@@ -11,6 +11,8 @@
 3. **`lizysdk.errors`** —— 标准化错误体系（错误码枚举、**业务码动态注册表**、AppError、标准子类、wrap/ensure）
 4. **`lizysdk.ext`** —— Web 框架适配器（FastAPI/Flask 的 AppError 异常处理，**可选依赖组 `[web]`**）
 5. **`lizysdk.pools`** —— 统一并发池（`create_pool(kind)`：thread/async/process；统一 submit/map/shutdown/stats/add_hook；重试/背压/超时/ctx 传播/八事件钩子；设计契约见 `docs/pools-design.md`）
+6. **`lizysdk.shell`** —— shell 执行包装（`run`：恒 shell=False、超时终止、富错误、标准 logging 命令日志；设计契约见 `docs/shell-dist-design.md`）
+7. **`lizysdk.dist`** —— 分布式原语（Redis 滑动窗口计数器 ZSET+Lua、分布式锁 SET NX PX + token + Lua；**可选组 `[redis]`，模块级懒加载**；设计契约见 `docs/shell-dist-design.md`）
 
 设计参考自 [BaiEJi/LzyTools](https://github.com/BaiEJi/LzyTools) 的 `basic_tool/id_generator` 与 `basic_tool/errors`，为独立发布重新实现（不共享代码）。
 
@@ -21,7 +23,7 @@
 - **全量类型注解**；公开 API 带中文 docstring（含可执行示例者优先，doctest 必须能过）。
 - **标识符英文、docstring/消息中文**；错误消息模板为中文。
 - **子包禁止叫 `logging`**（与标准库冲突），统一叫 `logs`。
-- **分层无循环导入**：errors 内部 `codes/registry → base → standard/utils`；各核心子包（ids/logs/errors/pools）之间**互不依赖**（协同发生在应用层，如 `bind_context(trace_id=new_trace_id())`）；`ext` 只依赖 errors。
+- **分层无循环导入**：errors 内部 `codes/registry → base → standard/utils`；各核心子包（ids/logs/errors/pools/shell/dist）之间**互不依赖**（协同发生在应用层，如 `bind_context(trace_id=new_trace_id())`）；`ext` 只依赖 errors。**懒加载红线**：`lizysdk.dist` 模块级禁止 import redis（函数体内懒加载，未装时 ImportError 中文提示 `pip install "lizysdk[redis]"`）；`lizysdk.shell` 恒 `shell=False` 且不得暴露 shell 开关。子模块日志一律走标准 logging（被 logs 子包统一格式捕获），不得 import lizysdk.logs。
 - **`ext` 子包铁律**：模块级**禁止** import 第三方库（fastapi/flask import 必须放在安装函数体内，未装时 `ImportError` 给中文提示 `pip install "lizysdk[web]"`）；核心包零依赖的红线不可破。
 - **线程安全**：一切跨线程共享状态必须持锁或使用 `contextvars`/`queue.Queue`，禁止全局可变状态裸奔。
 - **对外抛错统一 ValueError**（参数校验）；发送等 I/O 失败绝不向业务抛异常。
@@ -92,7 +94,16 @@ LEVEL||TIMESTAMP||FILE:LINE||sys_name=xxx||k1=v1||k2=v2||message=<文本>
 - 关键决策（勿回退）：① ThreadPool 用**自管 worker 线程**而非 `ThreadPoolExecutor`（stdlib 3.9+ 线程非 daemon 且不可控，daemon 契约要求自管，docstring 已记录该偏离）；② `max_tasks_per_worker` 仅 process 池支持且走 `multiprocessing.Pool(maxtasksperchild)` 双路径（3.10 的 `ProcessPoolExecutor` 无此参数）；③ 超时语义分池诚实声明：async=`asyncio.wait_for` 真取消（统一抛内建 `TimeoutError`），thread/process=结果等待超时不可中断；④ 钩子异常一律吞掉计数（`stats()["hook_errors"]`）；⑤ 闸门/计数器全程持锁，**任何路径下用户 Future 不得悬置**（曾有计数器名前缀错误、async 取消令牌泄漏、进程池取消悬置三个真实缺陷，安全网回调是兜底，勿删）。
 - 测试注意：process 套件用 session 级 fixture 复用池（Windows spawn 慢）；并发用例改完必须连跑 3 轮防抖。
 
+### shell / dist（`src/lizysdk/shell/` · `src/lizysdk/dist/`）
+
+- 契约唯一来源：`docs/shell-dist-design.md`；改接口先改文档。
+- shell：安全红线恒 `shell=False`（str argv 走 `shlex.split`，不支持管道/重定向）；超时语义依赖 `subprocess.run(timeout=...)`（Windows TerminateProcess）；`ShellTimeoutError` 携带部分输出。
+- dist 窗口计数器：ZSET+Lua 单脚本原子四步（ZADD→ZREMRANGEBYSCORE→ZCARD→PEXPIRE），窗口为 `(now-window, now]` 含边界剔除；member 唯一性靠 `{now}:{pid}:{token_hex}`；时间接缝是模块级 `_now()`（测试 monkeypatch 用，勿删）。内存 O(N)。
+- dist 锁：语义对齐 redis-py Lock（`SET NX PX` + token + Lua compare-token 释放/续期；**不可重入**；`LockNotOwnedError` 释放他人锁）；阻塞轮询带随机抖动防惊群；**效率锁非正确性锁**（Kleppmann 注记勿删）。测试用 fakeredis（Lua 需 lupa），锁 TTL 过期类用例用极短 timeout + 真实 sleep（fakeredis TTL 不受 monkeypatch 时间影响）。
+
 ### errors（`src/lizysdk/errors/`）
+
+- `ErrorCode(str, Enum)`：成员由 `(码名, 中文模板, HTTP 状态)` 三元组构造，属性 `template`/`http_status`，值即码名，可直接 JSON 序列化。
 
 - `ErrorCode(str, Enum)`：成员由 `(码名, 中文模板, HTTP 状态)` 三元组构造，属性 `template`/`http_status`，值即码名，可直接 JSON 序列化。
 - 模板渲染用 `format_map` + 安全字典：缺键保留 `{占位符}` 原样、多余键忽略，**绝不抛 KeyError**；显式 `message` 优先于模板。
@@ -104,7 +115,7 @@ LEVEL||TIMESTAMP||FILE:LINE||sys_name=xxx||k1=v1||k2=v2||message=<文本>
 
 ```bash
 cd C:/Users/Lizy/Desktop/Code/basekit
-python -m pytest -v                                    # 全量测试（当前 432 个，必须全绿）
+python -m pytest -v                                    # 全量测试（当前 527 个，必须全绿）
 python -m pytest tests/test_logs.py -v                 # 单模块
 python -m pytest --doctest-modules src/lizysdk/errors  # docstring 示例验证
 python examples/demo.py                                # 端到端冒烟
@@ -127,6 +138,7 @@ python -m pip install -e .                             # 开发安装（可省�
 
 ## 变更记录
 
+- **0.6.0** —— 新增 lizysdk.shell（run/富错误/结构化命令日志）与 lizysdk.dist（Redis 滑动窗口计数器 + 分布式锁，可选组 [redis] 懒加载）；对比参考 sh/plumbum/limits/redis-py Lock/Redlock（docs/shell-dist-design.md）；92 新测试；多版本矩阵（3.9~3.13）随 0.5.x 建立
 - **0.5.0** —— 新增 lizysdk.pools 统一并发池（设计契约 docs/pools-design.md；78 新测试；参考 concurrent.futures/pebble/anyio）
 - **0.4.0** —— 性能专项：热路径缓存/快速路径、SimpleQueue+屏障令牌、缓冲写 handler（分层语义）、熵缓冲、ULID 查表；JSONL 紧凑输出；新增 benchmarks（几何平均 +74.4%，方法与数据见 benchmarks/REPORT.md）
 - **0.3.0** —— errors：业务码注册表、include_cause、ext FastAPI/Flask 适配器；ids：ULID 可排序 ID、worker_id 协商

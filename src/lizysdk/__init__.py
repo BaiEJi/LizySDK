@@ -10,6 +10,9 @@
   序列化往返 / wrap·ensure）
 - :mod:`lizysdk.ext`    —— Web 框架适配器（FastAPI/Flask，需 ``pip install lizysdk[web]``）
 - :mod:`lizysdk.pools`  —— 统一并发池（线程/协程/进程，初始化选类型，钩子 + 统计）
+- :mod:`lizysdk.shell` —— shell 执行包装（安全 argv、超时、结构化命令日志、富错误）
+- :mod:`lizysdk.dist` —— 分布式原语（Redis 滑动窗口计数器 / 分布式锁，
+  可选依赖组 ``pip install lizysdk[redis]``，模块级懒加载）
 
 一行日志的格式契约（``message`` 恒为最后一段）::
 
@@ -49,6 +52,14 @@ from .errors import (
     unregister_code,
     wrap,
 )
+from .dist import (
+    DLock,
+    LockError,
+    LockNotOwnedError,
+    LockTimeoutError,
+    SlidingWindowCounter,
+)
+from .shell import ShellError, ShellResult, ShellTimeoutError, run
 from .ids import (
     ClockBackwardsError,
     DEFAULT_EPOCH_MS,
@@ -85,8 +96,6 @@ from .pools import (
     create_pool,
     run_all,
 )
-
-__version__ = "0.5.0"
 
 __all__ = [
     # ids —— 唯一 ID / trace_id
@@ -141,4 +150,17 @@ __all__ = [
     "PoolError",
     "PoolClosedError",
     "PoolRejectedError",
+    # shell —— shell 执行包装
+    "run",
+    "ShellResult",
+    "ShellError",
+    "ShellTimeoutError",
+    # dist —— 分布式原语（可选依赖组 lizysdk[redis]）
+    "SlidingWindowCounter",
+    "DLock",
+    "LockError",
+    "LockTimeoutError",
+    "LockNotOwnedError",
 ]
+
+__version__ = "0.6.0"

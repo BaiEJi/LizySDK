@@ -131,6 +131,26 @@ def test_run_all_top_level() -> None:
     assert out == ["A", "b"]
 
 
+def test_shell_and_dist_wired() -> None:
+    """0.6.0 新能力贯通：shell 执行 + 窗口计数 + 分布式锁（fakeredis 离线）。"""
+    import sys as _sys
+
+    res = bk.run([_sys.executable, "-c", "print('ok')"])
+    assert res.ok and res.stdout.strip() == "ok"
+
+    import fakeredis
+
+    client = fakeredis.FakeStrictRedis()
+    counter = bk.SlidingWindowCounter(client, window=60)
+    assert counter.incr("it") == 1
+    assert counter.allow("it", 5) is True
+
+    with bk.DLock(client, "it-lock", timeout=2):
+        other = bk.DLock(client, "it-lock", timeout=2)
+        assert other.acquire(blocking=False) is False
+    assert bk.DLock(client, "it-lock", timeout=2).acquire(blocking=False) is True
+
+
 def test_error_wrapped_into_log_with_trace(tmp_path) -> None:
     """wrap() 包装底层异常后，异常信息可结构化进入日志，trace_id 全程一致。"""
     log_dir = tmp_path / "logs"

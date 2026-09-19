@@ -1,11 +1,11 @@
 # lizysdk
 
-通用 Python 基础工具包：**唯一 ID / trace_id 生成 · 结构化日志（pipe/JSON 双格式 + 远程发送）· 标准化错误体系（业务码注册表 + Web 框架适配）· 统一并发池（线程/协程/进程）**。
+通用 Python 基础工具包：**唯一 ID / trace_id 生成 · 结构化日志（pipe/JSON 双格式 + 远程发送）· 标准化错误体系（业务码注册表 + Web 框架适配）· 统一并发池（线程/协程/进程）· shell 执行包装 · 分布式原语（Redis 滑动窗口/分布式锁）**。
 
-- 核心纯标准库，**零第三方依赖**，`import lizysdk` 即用；Web 适配器走可选依赖组 `lizysdk[web]`
-- Python **3.9+**，全量类型注解（随包发布 `py.typed`）
+- 核心纯标准库，**零第三方依赖**，`import lizysdk` 即用；Web 适配 `lizysdk[web]`、Redis 组件 `lizysdk[redis]` 走可选依赖组
+- Python **3.9~3.13 实测全绿**（见支持矩阵），全量类型注解（随包发布 `py.typed`）
 - 线程安全（ID 生成器与日志写入均经并发验证）
-- **432 个测试**全绿
+- **527 个测试**全绿
 - 仓库：<https://github.com/BaiEJi/LizySDK>
 
 ## 安装
@@ -13,7 +13,8 @@
 ```bash
 pip install -e .            # 核心功能（零依赖）
 pip install -e .[web]       # + FastAPI/Flask 异常适配器
-pip install -e .[dev]       # + 测试依赖（pytest/fastapi/flask/httpx）
+pip install -e .[redis]     # + 分布式原语（滑动窗口计数器 / 分布式锁）
+pip install -e .[dev]       # + 测试依赖（pytest/fastapi/flask/httpx/redis/fakeredis）
 ```
 
 ## 一分钟上手
@@ -248,6 +249,41 @@ run_all([(fetch, (u,), {}) for u in urls], kind="thread", workers=8)   # 一次�
   pebble / anyio；**文末附压测数据**：线程池 ×15.9 近理想线性、进程池 CPU ×4.2、
   协程池 ×145、包装层与 stdlib 端到端持平）
 
+### 6. shell 执行包装（`lizysdk.shell`）
+
+`subprocess.run` 的薄加固层：恒 `shell=False` 安全执行、超时终止、富错误、命令与耗时自动结构化进日志。
+
+```python
+from lizysdk import run, ShellError
+
+res = bk.run("git", "status", timeout=10)     # str argv 自动 shlex 拆分（不支持管道/重定向）
+res.ok / res.returncode / res.stdout / res.stderr / res.elapsed_ms
+run("python", "-m", "pip", "install", "xxx", check=True)   # 非零退出抛 ShellError（含全部上下文）
+```
+
+命令日志经标准 logging 通道输出，被 `setup_logging` 统一格式捕获（argv/elapsed_ms/returncode）。
+
+### 7. 分布式原语（`lizysdk.dist`，需 `pip install lizysdk[redis]`）
+
+**滑动窗口计数器**（limits 库同款 ZSET+Lua 原子方案）与**分布式锁**（redis-py Lock 同款
+SET NX PX + token + Lua 释放/续期）：
+
+```python
+from lizysdk import SlidingWindowCounter, DLock
+
+counter = SlidingWindowCounter(client, window=60)       # 60 秒滑动窗口
+counter.incr("user:1:api")                              # -> 窗口内当前计数（原子）
+counter.allow("user:1:api", limit=100)                  # 限流判定薄糖
+
+with DLock(client, "job:42", timeout=10):               # TTL 10s，崩溃自动过期
+    run_job()                                           # 不可重入；token 保护防误删他人锁
+lock.extend(10)                                         # 续期（compare-token）
+```
+
+诚实边界：锁为**单实例效率锁**（多节点 Redlock 见设计文档 v2）；强互斥正确性需业务侧
+fencing token。设计对比（sh/plumbum、limits/redis-cell、Redlock/Kleppmann 争议）见
+[docs/shell-dist-design.md](docs/shell-dist-design.md)。
+
 ---
 
 ## 完整示例
@@ -321,7 +357,9 @@ lizysdk/
 │   ├── errors/     # codes.py 错误码 · registry.py 业务码注册表 · base.py AppError
 │   │               # standard.py 子类 · utils.py wrap/ensure
 │   ├── ext/        # fastapi_adapter.py · flask_adapter.py（可选依赖组 [web]）
-│   └── pools/      # 统一并发池：base/thread_pool/async_pool/process_pool/exceptions
+│   ├── pools/      # 统一并发池：base/thread_pool/async_pool/process_pool/exceptions
+│   ├── shell/      # shell 执行包装：run/ShellResult/ShellError（零依赖）
+│   └── dist/       # 分布式原语：window.py 滑动窗口 · lock.py 分布式锁（可选组 [redis]，懒加载）
 ├── tests/          # test_ids / test_logs / test_errors / test_ext_web / test_integration
 ├── benchmarks/     # bench.py 压测脚本 · report.py 聚合对比 · REPORT.md 报告 · results/
 ├── examples/       # demo.py 基础三件套 · web_demo.py FastAPI 全家桶
@@ -357,6 +395,10 @@ python examples/web_demo.py                           # 全家桶端到端冒烟
 
 ## 变更记录
 
+- **0.6.0** —— 新增 `lizysdk.shell`（run/ShellResult/ShellError，恒 shell=False、超时、
+  结构化命令日志）与 `lizysdk.dist`（Redis 滑动窗口计数器 ZSET+Lua 原子、分布式锁
+  SET NX PX + token + Lua 释放/续期；可选组 `[redis]` 懒加载）；设计对比
+  docs/shell-dist-design.md（参考 sh/plumbum、limits、redis-py Lock/Redlock）；92 个新测试
 - **0.5.0** —— 新增 `lizysdk.pools` 统一并发池：线程/协程/进程三池统一入口
   `create_pool(kind, ...)`，统一 `submit/map/shutdown/stats/add_hook`；重试（指数退避）、
   背压（queue_size + reject_policy）、单任务超时（async 真取消）、contextvars 传播、
