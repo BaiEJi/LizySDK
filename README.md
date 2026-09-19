@@ -1,11 +1,11 @@
 # lizysdk
 
-通用 Python 基础工具包：**唯一 ID / trace_id 生成 · 结构化日志（pipe/JSON 双格式 + 远程发送）· 标准化错误体系（业务码注册表 + Web 框架适配）**。
+通用 Python 基础工具包：**唯一 ID / trace_id 生成 · 结构化日志（pipe/JSON 双格式 + 远程发送）· 标准化错误体系（业务码注册表 + Web 框架适配）· 统一并发池（线程/协程/进程）**。
 
 - 核心纯标准库，**零第三方依赖**，`import lizysdk` 即用；Web 适配器走可选依赖组 `lizysdk[web]`
 - Python **3.9+**，全量类型注解（随包发布 `py.typed`）
-- 线程安全（ID 生成与日志写入均经并发验证）
-- **354 个测试**全绿
+- 线程安全（ID 生成器与日志写入均经并发验证）
+- **432 个测试**全绿
 - 仓库：<https://github.com/BaiEJi/LizySDK>
 
 ## 安装
@@ -216,6 +216,37 @@ app = install_fastapi_handler(FastAPI(), include_generic=True)
 # 抛未知异常(可选开启) -> 500 + INTERNAL_ERROR
 ```
 
+### 5. 统一并发池（`lizysdk.pools`）
+
+线程池 / 协程池 / 进程池：**初始化时选择类型**，配置与行为语义一致，内置重试、背压、钩子与统计。
+
+```python
+from lizysdk import create_pool, run_all
+
+with create_pool("thread", workers=8, name="io",
+                 max_retries=2, retry_backoff=0.5,           # 失败重试（指数退避）
+                 task_timeout=10, queue_size=1000) as pool:   # 在途上限 + 超时
+    fut = pool.submit(fetch, url)          # -> concurrent.futures.Future
+    print(fut.result())
+
+apool = create_pool("async", workers=32)   # 协程池：submit / await asubmit，超时「真取消」
+ppool = create_pool("process", max_tasks_per_worker=100)   # 进程池：CPU 密集、worker 回收
+
+pool.stats()                               # submitted/running/succeeded/failed/retried/...
+pool.add_hook("on_error", lambda info: ...)  # 八事件钩子：
+# submit / start / success / error / retry / timeout / reject / shutdown
+
+run_all([(fetch, (u,), {}) for u in urls], kind="thread", workers=8)   # 一次性并行
+```
+
+- 统一接口：`submit / map / shutdown / stats / add_hook` + 上下文管理器，三种池一致
+- **contextvars 传播**（thread/async）：`bind_context(trace_id=...)` 后任务内日志/trace 不丢
+- 背压：`queue_size` + `reject_policy="raise"|"block"`；钩子自身异常被吞并计数，绝不影响任务
+- 诚实语义：thread/process 的 `task_timeout` 为结果等待超时（任务本体不可中断），async 为
+  `asyncio.wait_for` 真取消；进程池不传播 contextvars（不可 pickle）
+- 设计与取舍详见 [docs/pools-design.md](docs/pools-design.md)（参考 concurrent.futures /
+  pebble / anyio）
+
 ---
 
 ## 完整示例
@@ -288,7 +319,8 @@ lizysdk/
 │   │               # handlers.py 轮转/后台写入池/发送派发 · sender.py HTTP 发送 · context.py 上下文
 │   ├── errors/     # codes.py 错误码 · registry.py 业务码注册表 · base.py AppError
 │   │               # standard.py 子类 · utils.py wrap/ensure
-│   └── ext/        # fastapi_adapter.py · flask_adapter.py（可选依赖组 [web]）
+│   ├── ext/        # fastapi_adapter.py · flask_adapter.py（可选依赖组 [web]）
+│   └── pools/      # 统一并发池：base/thread_pool/async_pool/process_pool/exceptions
 ├── tests/          # test_ids / test_logs / test_errors / test_ext_web / test_integration
 ├── benchmarks/     # bench.py 压测脚本 · report.py 聚合对比 · REPORT.md 报告 · results/
 ├── examples/       # demo.py 基础三件套 · web_demo.py FastAPI 全家桶
@@ -308,6 +340,11 @@ python examples/web_demo.py                           # 全家桶端到端冒烟
 
 ## 变更记录
 
+- **0.5.0** —— 新增 `lizysdk.pools` 统一并发池：线程/协程/进程三池统一入口
+  `create_pool(kind, ...)`，统一 `submit/map/shutdown/stats/add_hook`；重试（指数退避）、
+  背压（queue_size + reject_policy）、单任务超时（async 真取消）、contextvars 传播、
+  八事件钩子、运行统计；`run_all` 一次性并行；78 个新测试（设计文档
+  docs/pools-design.md）
 - **0.4.0** —— 性能专项优化（同机交错压测几何平均 **+74.4%**，354 测试零回归）：
   秒级时间戳/键名校验/basename 缓存、转义与解析快速路径、写队列 SimpleQueue +
   屏障令牌 flush、异步模式缓冲写 handler（flush 语义不变）、随机 ID 线程本地

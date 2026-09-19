@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lizysdk"
-version = "0.4.0"
+version = "0.5.0"
 description = "通用 Python 基础工具包：唯一 ID / trace_id 生成、结构化日志、标准化错误"
 readme = "README.md"
 requires-python = ">=3.9"

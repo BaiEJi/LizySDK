@@ -10,6 +10,7 @@
 2. **`lizysdk.logs`** —— 结构化日志（**sys_name 系统标识**、pipe/JSON 双格式、轮转、后台写入池、线程安全、contextvars 上下文、**打印完即发送 JSON 到远端**）
 3. **`lizysdk.errors`** —— 标准化错误体系（错误码枚举、**业务码动态注册表**、AppError、标准子类、wrap/ensure）
 4. **`lizysdk.ext`** —— Web 框架适配器（FastAPI/Flask 的 AppError 异常处理，**可选依赖组 `[web]`**）
+5. **`lizysdk.pools`** —— 统一并发池（`create_pool(kind)`：thread/async/process；统一 submit/map/shutdown/stats/add_hook；重试/背压/超时/ctx 传播/八事件钩子；设计契约见 `docs/pools-design.md`）
 
 设计参考自 [BaiEJi/LzyTools](https://github.com/BaiEJi/LzyTools) 的 `basic_tool/id_generator` 与 `basic_tool/errors`，为独立发布重新实现（不共享代码）。
 
@@ -20,7 +21,7 @@
 - **全量类型注解**；公开 API 带中文 docstring（含可执行示例者优先，doctest 必须能过）。
 - **标识符英文、docstring/消息中文**；错误消息模板为中文。
 - **子包禁止叫 `logging`**（与标准库冲突），统一叫 `logs`。
-- **分层无循环导入**：errors 内部 `codes/registry → base → standard/utils`；三个核心子包之间互不依赖（协同发生在应用层，如 `bind_context(trace_id=new_trace_id())`）；`ext` 只依赖 errors。
+- **分层无循环导入**：errors 内部 `codes/registry → base → standard/utils`；各核心子包（ids/logs/errors/pools）之间**互不依赖**（协同发生在应用层，如 `bind_context(trace_id=new_trace_id())`）；`ext` 只依赖 errors。
 - **`ext` 子包铁律**：模块级**禁止** import 第三方库（fastapi/flask import 必须放在安装函数体内，未装时 `ImportError` 给中文提示 `pip install "lizysdk[web]"`）；核心包零依赖的红线不可破。
 - **线程安全**：一切跨线程共享状态必须持锁或使用 `contextvars`/`queue.Queue`，禁止全局可变状态裸奔。
 - **对外抛错统一 ValueError**（参数校验）；发送等 I/O 失败绝不向业务抛异常。
@@ -84,6 +85,13 @@ LEVEL||TIMESTAMP||FILE:LINE||sys_name=xxx||k1=v1||k2=v2||message=<文本>
 - 已知契约自洽决策：`PipeLogger` 消息形参名为 `msg`（沿用标准库），使 `log.info("m", message="x")` 落入 `**fields` 由校验器抛 `ValueError`（若形参叫 `message` 会先抛 `TypeError`，违背契约）。
 - sender.py / handlers.py 分工：`JsonSender`（urllib.request + 锁保护计数）、`SendDispatcher`（FIFO 守护线程）；`_SendHandler` 挂在 handler 链末尾。
 
+### pools（`src/lizysdk/pools/`）
+
+- 契约唯一来源：`docs/pools-design.md`；改接口先改文档。
+- 自持异常族（`PoolError/PoolClosedError/PoolRejectedError`），**禁止 import 其他 lizysdk 子包**。
+- 关键决策（勿回退）：① ThreadPool 用**自管 worker 线程**而非 `ThreadPoolExecutor`（stdlib 3.9+ 线程非 daemon 且不可控，daemon 契约要求自管，docstring 已记录该偏离）；② `max_tasks_per_worker` 仅 process 池支持且走 `multiprocessing.Pool(maxtasksperchild)` 双路径（3.10 的 `ProcessPoolExecutor` 无此参数）；③ 超时语义分池诚实声明：async=`asyncio.wait_for` 真取消（统一抛内建 `TimeoutError`），thread/process=结果等待超时不可中断；④ 钩子异常一律吞掉计数（`stats()["hook_errors"]`）；⑤ 闸门/计数器全程持锁，**任何路径下用户 Future 不得悬置**（曾有计数器名前缀错误、async 取消令牌泄漏、进程池取消悬置三个真实缺陷，安全网回调是兜底，勿删）。
+- 测试注意：process 套件用 session 级 fixture 复用池（Windows spawn 慢）；并发用例改完必须连跑 3 轮防抖。
+
 ### errors（`src/lizysdk/errors/`）
 
 - `ErrorCode(str, Enum)`：成员由 `(码名, 中文模板, HTTP 状态)` 三元组构造，属性 `template`/`http_status`，值即码名，可直接 JSON 序列化。
@@ -96,7 +104,7 @@ LEVEL||TIMESTAMP||FILE:LINE||sys_name=xxx||k1=v1||k2=v2||message=<文本>
 
 ```bash
 cd C:/Users/Lizy/Desktop/Code/basekit
-python -m pytest -v                                    # 全量测试（当前 353 个，必须全绿）
+python -m pytest -v                                    # 全量测试（当前 432 个，必须全绿）
 python -m pytest tests/test_logs.py -v                 # 单模块
 python -m pytest --doctest-modules src/lizysdk/errors  # docstring 示例验证
 python examples/demo.py                                # 端到端冒烟
@@ -118,6 +126,7 @@ python -m pip install -e .                             # 开发安装（可省�
 
 ## 变更记录
 
+- **0.5.0** —— 新增 lizysdk.pools 统一并发池（设计契约 docs/pools-design.md；78 新测试；参考 concurrent.futures/pebble/anyio）
 - **0.4.0** —— 性能专项：热路径缓存/快速路径、SimpleQueue+屏障令牌、缓冲写 handler（分层语义）、熵缓冲、ULID 查表；JSONL 紧凑输出；新增 benchmarks（几何平均 +74.4%，方法与数据见 benchmarks/REPORT.md）
 - **0.3.0** —— errors：业务码注册表、include_cause、ext FastAPI/Flask 适配器；ids：ULID 可排序 ID、worker_id 协商
 - **0.2.0** —— trace_id 默认 16 位可选位数；新增 `new_uid`；日志 sys_name/JSONL/send_json 发送/send_stats；包更名 lizysdk

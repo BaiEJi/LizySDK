@@ -9,6 +9,7 @@
 - :mod:`lizysdk.errors` —— 标准化错误体系（错误码 / 业务码动态注册表 / 模板消息 /
   序列化往返 / wrap·ensure）
 - :mod:`lizysdk.ext`    —— Web 框架适配器（FastAPI/Flask，需 ``pip install lizysdk[web]``）
+- :mod:`lizysdk.pools`  —— 统一并发池（线程/协程/进程，初始化选类型，钩子 + 统计）
 
 一行日志的格式契约（``message`` 恒为最后一段）::
 
@@ -73,8 +74,19 @@ from .logs import (
     send_stats,
     setup_logging,
 )
+from .pools import (
+    AsyncPool,
+    Pool,
+    PoolClosedError,
+    PoolError,
+    PoolRejectedError,
+    ProcessPool,
+    ThreadPool,
+    create_pool,
+    run_all,
+)
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 __all__ = [
     # ids —— 唯一 ID / trace_id
@@ -119,4 +131,14 @@ __all__ = [
     "registered_codes",
     # ext —— Web 框架适配（可选依赖组 lizysdk[web]）
     "ext",
+    # pools —— 统一并发池
+    "create_pool",
+    "run_all",
+    "ThreadPool",
+    "AsyncPool",
+    "ProcessPool",
+    "Pool",
+    "PoolError",
+    "PoolClosedError",
+    "PoolRejectedError",
 ]

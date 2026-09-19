@@ -455,12 +455,21 @@ class PipeLogFormatter(_LineFormatterBase):
         self._sys_segment = f"{SYS_NAME_KEY}={escape_value(self.sys_name)}"
 
     def format(self, record: logging.LogRecord) -> str:
-        """把 LogRecord 拼装为一行 pipe-logfmt 文本（保证单行）。"""
+        """把 LogRecord 拼装为一行 pipe-logfmt 文本（保证单行）。
+
+        记录级 sys_name 覆盖（``extra={'sys_name': ...}``）优先于默认段。
+        """
+        override = record.__dict__.get(SYS_NAME_KEY)
+        sys_segment = self._sys_segment
+        if isinstance(override, str):
+            override = override.strip()
+            if override and len(override) <= 64 and override != self.sys_name:
+                sys_segment = SYS_NAME_KEY + "=" + escape_value(override)
         parts: list[str] = [
             record.levelname,
             self.formatTime(record, self.datefmt),
             f"{_cached_basename(record.pathname)}:{record.lineno}",
-            self._sys_segment,
+            sys_segment,
         ]
         for key, value in self._ordered_fields(record):
             parts.append(f"{key}={escape_value(value)}")
@@ -499,6 +508,16 @@ class JsonLogFormatter(_LineFormatterBase):
         """
         super().__init__(datefmt=datefmt, sys_name=sys_name)
 
+    def _record_sys_name(self, record: logging.LogRecord) -> str:
+        """记录级 sys_name 覆盖：``extra={'sys_name': 'app.blog'}`` 时优先，
+        非法取值（空/超长）回退到 setup 注入的默认值。"""
+        override = record.__dict__.get(SYS_NAME_KEY)
+        if isinstance(override, str):
+            override = override.strip()
+            if override and len(override) <= 64:
+                return override
+        return self.sys_name
+
     def format(self, record: logging.LogRecord) -> str:
         """把 LogRecord 编码为一行 JSON 文本（保证单行、UTF-8、中文不转义）。"""
         payload: dict[str, Any] = {
@@ -506,7 +525,7 @@ class JsonLogFormatter(_LineFormatterBase):
             "timestamp": self.formatTime(record, self.datefmt),
             "file": _cached_basename(record.pathname),
             "line": record.lineno,
-            SYS_NAME_KEY: self.sys_name,
+            SYS_NAME_KEY: self._record_sys_name(record),
         }
         payload.update(self._ordered_fields(record))
         payload["message"] = self._compose_message(record)

@@ -99,6 +99,38 @@ def test_v03_capabilities_wired(monkeypatch) -> None:
     assert code not in bk.registered_codes()
 
 
+def test_pools_context_flows_into_logs(tmp_path) -> None:
+    """pools × logs 协同：bind_context 的 trace_id 经线程池传播进任务内日志。"""
+    log_dir = tmp_path / "logs"
+    bk.setup_logging(log_dir, "app.log", console=False, async_writer=False)
+    trace_id = bk.new_trace_id()
+    bk.bind_context(trace_id=trace_id)
+
+    def task() -> str:
+        log = bk.get_logger("task")
+        log.info("running in worker", job="sync")
+        return bk.new_uid(8)
+
+    with bk.create_pool("thread", workers=2, name="it-pool") as pool:
+        uid = pool.submit(task).result(timeout=10)
+    bk.clear_context()
+
+    line = (log_dir / "app.log").read_text(encoding="utf-8").splitlines()[0]
+    parsed = bk.parse_line(line)
+    assert parsed["trace_id"] == trace_id
+    assert parsed["job"] == "sync"
+    assert len(uid) == 8
+
+
+def test_run_all_top_level() -> None:
+    """顶层 run_all：保序执行与结果返回。"""
+    out = bk.run_all(
+        [(str.upper, ("a",), {}), (str.lower, ("B",), {})],
+        kind="thread", workers=2,
+    )
+    assert out == ["A", "b"]
+
+
 def test_error_wrapped_into_log_with_trace(tmp_path) -> None:
     """wrap() 包装底层异常后，异常信息可结构化进入日志，trace_id 全程一致。"""
     log_dir = tmp_path / "logs"
