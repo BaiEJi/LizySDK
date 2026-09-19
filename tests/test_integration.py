@@ -1,0 +1,104 @@
+"""跨子模块集成测试：顶层导出自洽 + trace_id 注入日志 + 错误对象落盘全链路。"""
+
+from __future__ import annotations
+
+import lizysdk as bk
+
+
+def test_top_level_exports_cover_three_submodules() -> None:
+    """顶层 __all__ 的每个名字都可导入、可调用/可实例化，且与子模块同源。"""
+    assert bk.__version__
+    for name in bk.__all__:
+        assert hasattr(bk, name), f"顶层缺失导出: {name}"
+
+    assert bk.new_trace_id() != bk.new_trace_id()
+    assert isinstance(bk.new_id(), int)
+    assert bk.new_prefixed_id("ORD").startswith("ORD_")
+    assert issubclass(bk.NotFoundError, bk.AppError)
+    assert isinstance(bk.ErrorCode.RESOURCE_NOT_FOUND, str)
+
+
+def test_trace_flow_logging_and_errors(tmp_path) -> None:
+    """trace_id 经 bind_context 进入每行日志；AppError 属性作为 kv 落盘。"""
+    log_dir = tmp_path / "logs"
+    bk.setup_logging(log_dir, "app.log", level="DEBUG", console=False, async_writer=False)
+    log = bk.get_logger("integration")
+
+    trace_id = bk.new_trace_id()
+    bk.bind_context(trace_id=trace_id)
+
+    log.info("user logged in", user_id=123, action="login")
+
+    captured: bk.AppError | None = None
+    try:
+        raise bk.NotFoundError(params={"resource": "订单"})
+    except bk.AppError as exc:
+        captured = exc
+        log.error("request failed", code=exc.code, resource="订单")
+    bk.flush(5)
+
+    lines = (log_dir / "app.log").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+
+    first = bk.parse_line(lines[0])
+    assert first["level"] == "INFO"
+    assert first["sys_name"] == "app"
+    assert first["trace_id"] == trace_id
+    assert first["user_id"] == "123"
+    assert first["action"] == "login"
+    assert first["message"] == "user logged in"
+    assert first["file"] == "test_integration.py"
+
+    second = bk.parse_line(lines[1])
+    assert second["level"] == "ERROR"
+    assert "RESOURCE_NOT_FOUND" in second["code"]
+    assert second["message"] == "request failed"
+
+    assert captured is not None
+    assert captured.to_dict()["code"] == "RESOURCE_NOT_FOUND"
+    bk.clear_context()
+
+
+def test_json_format_output_and_sys_name(tmp_path) -> None:
+    """json_format=True 时输出 JSONL，sys_name 注入，parse_line 双格式可解析。"""
+    log_dir = tmp_path / "logs"
+    bk.setup_logging(
+        log_dir, "app.log", console=False, async_writer=False,
+        sys_name="order-svc", json_format=True,
+    )
+    bk.get_logger("integration").info("hello json", req_id=bk.new_uid())
+
+    line = (log_dir / "app.log").read_text(encoding="utf-8").splitlines()[0]
+    parsed = bk.parse_line(line)
+    assert parsed["sys_name"] == "order-svc"
+    assert parsed["level"] == "INFO"
+    assert parsed["file"] == "test_integration.py"
+    assert parsed["req_id"]
+    assert parsed["message"] == "hello json"
+
+
+def test_error_wrapped_into_log_with_trace(tmp_path) -> None:
+    """wrap() 包装底层异常后，异常信息可结构化进入日志，trace_id 全程一致。"""
+    log_dir = tmp_path / "logs"
+    bk.setup_logging(log_dir, "app.log", console=False, async_writer=False)
+
+    trace_id = bk.new_trace_id()
+    bk.bind_context(trace_id=trace_id)
+
+    try:
+        try:
+            raise ValueError("connection refused")
+        except ValueError as inner:
+            raise bk.wrap(inner, code=bk.ErrorCode.SERVICE_UNAVAILABLE, details={"host": "db-1"}) from inner
+    except bk.AppError as app_err:
+        bk.get_logger("integration").error(
+            "upstream failed", error_code=app_err.code, host=app_err.details["host"]
+        )
+    bk.flush(5)
+
+    line = (log_dir / "app.log").read_text(encoding="utf-8").splitlines()[0]
+    parsed = bk.parse_line(line)
+    assert parsed["trace_id"] == trace_id
+    assert "SERVICE_UNAVAILABLE" in parsed["error_code"]
+    assert parsed["host"] == "db-1"
+    bk.clear_context()
