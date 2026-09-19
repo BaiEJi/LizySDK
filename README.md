@@ -245,7 +245,8 @@ run_all([(fetch, (u,), {}) for u in urls], kind="thread", workers=8)   # 一次�
 - 诚实语义：thread/process 的 `task_timeout` 为结果等待超时（任务本体不可中断），async 为
   `asyncio.wait_for` 真取消；进程池不传播 contextvars（不可 pickle）
 - 设计与取舍详见 [docs/pools-design.md](docs/pools-design.md)（参考 concurrent.futures /
-  pebble / anyio）
+  pebble / anyio；**文末附压测数据**：线程池 ×15.9 近理想线性、进程池 CPU ×4.2、
+  协程池 ×145、包装层与 stdlib 端到端持平）
 
 ---
 

@@ -1,0 +1,68 @@
+{
+  "meta": {
+    "lizysdk_version": "0.5.0",
+    "python": "3.10.19 | packaged by Anaconda, Inc. | (main, Oct 21 2025, 16:41:31) [MSC v.1929 64 bit (AMD64)]",
+    "platform": "Windows-10-10.0.19041-SP0",
+    "cpu": "Intel64 Family 6 Model 167 Stepping 1, GenuineIntel",
+    "timestamp": "2026-09-19T21:48:49"
+  },
+  "io_thread": {
+    "task_ms": 1.0,
+    "n": 2000,
+    "serial_s": 31.167176899998594,
+    "thread_w1_s": 31.162572299999738,
+    "thread_w1_speedup": 1.0001477605877502,
+    "thread_w2_s": 15.594655299999431,
+    "thread_w2_speedup": 1.9985806868074687,
+    "thread_w4_s": 7.818470599999273,
+    "thread_w4_speedup": 3.986352126207585,
+    "thread_w8_s": 3.912347999998019,
+    "thread_w8_speedup": 7.966361095693526,
+    "thread_w16_s": 1.9577709000004688,
+    "thread_w16_speedup": 15.919726307092995,
+    "stdlib_thread_w8_s": 3.904943000001367,
+    "stdlib_vs_ours_w8": 0.9981072747115912
+  },
+  "cpu_process": {
+    "per_task_ms": 103.08359999908134,
+    "n": 24,
+    "serial_s": 2.3861395999992965,
+    "process_w1_s": 2.5468106999978772,
+    "process_w1_speedup": 0.9369128219860571,
+    "process_w2_s": 1.2874972999998135,
+    "process_w2_speedup": 1.8533161972453396,
+    "process_w4_s": 0.8094913999993878,
+    "process_w4_speedup": 2.9477022238915707,
+    "process_w8_s": 0.569793300001038,
+    "process_w8_speedup": 4.187728427124274,
+    "thread_w8_s": 2.365016400002787,
+    "thread_w8_speedup": 1.0089315236868905
+  },
+  "async_pool": {
+    "task_ms": 1.0,
+    "n": 5000,
+    "serial_s": 77.96498599999904,
+    "async_w8_s": 0.5374731999982032,
+    "async_w8_speedup": 145.05836942243758,
+    "async_w16_s": 0.5922132999985479,
+    "async_w16_speedup": 131.65017739417573,
+    "async_w32_s": 0.5689649999985704,
+    "async_w32_speedup": 137.02949390594313,
+    "async_w64_s": 0.5589421000004222,
+    "async_w64_speedup": 139.4866945967036,
+    "gather_s": 0.09978140000021085
+  },
+  "submit_latency": {
+    "n": 20000,
+    "ours_us": 56.65143500009435,
+    "stdlib_us": 14.656379999905766
+  },
+  "feature_overhead": {
+    "n": 1000,
+    "base_s": 1.9559776999994938,
+    "hooks8_overhead_us": -6.636300000536721,
+    "noctx_delta_us": -9.299500001361594,
+    "retry_cfg_overhead_us": 1.6169000009540468,
+    "timeout_cfg_overhead_us": 2.5155999974231236
+  }
+}
