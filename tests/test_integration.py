@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 import lizysdk as bk
 
 
@@ -75,6 +77,26 @@ def test_json_format_output_and_sys_name(tmp_path) -> None:
     assert parsed["file"] == "test_integration.py"
     assert parsed["req_id"]
     assert parsed["message"] == "hello json"
+
+
+def test_v03_capabilities_wired(monkeypatch) -> None:
+    """0.3.0 新能力贯通：ULID 可排序、worker_id env 协商、业务码注册表生效。"""
+    sid1, sid2 = bk.new_sortable_id(), bk.new_sortable_id()
+    assert len(sid1) == 26 and sid2 > sid1
+    assert abs(bk.sortable_id_timestamp(sid1) - time.time()) < 5
+
+    monkeypatch.setenv("LIZYSDK_TEST_WORKER_ID", "7")
+    assert bk.resolve_worker_id(env_var="LIZYSDK_TEST_WORKER_ID") == 7
+
+    code = bk.register_code("IT_DEMO_CODE", "演示业务错误: {name}", 422)
+    try:
+        err = bk.AppError(code, params={"name": "订单"})
+        assert err.http_status == 422
+        assert err.message == "演示业务错误: 订单"
+        assert code in bk.registered_codes()
+    finally:
+        bk.unregister_code(code)
+    assert code not in bk.registered_codes()
 
 
 def test_error_wrapped_into_log_with_trace(tmp_path) -> None:

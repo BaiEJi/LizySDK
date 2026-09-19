@@ -1,18 +1,19 @@
 # lizysdk
 
-通用 Python 基础工具包：**唯一 ID / trace_id 生成 · 结构化日志（pipe/JSON 双格式 + 远程发送）· 标准化错误体系**。
+通用 Python 基础工具包：**唯一 ID / trace_id 生成 · 结构化日志（pipe/JSON 双格式 + 远程发送）· 标准化错误体系（含业务码注册表与 Web 框架适配）**。
 
-- 纯标准库实现，**零第三方依赖**，业务代码可轻松接入
+- 核心纯标准库，**零第三方依赖**，业务代码可轻松接入；Web 适配器走可选依赖组 `lizysdk[web]`
 - Python **3.9+**，全量类型注解（随包发布 `py.typed`）
 - 线程安全（ID 生成器与日志写入均经并发验证）
-- **225 个测试** + doctest 全绿
+- **353 个测试** + doctest 全绿
 - 仓库：https://github.com/BaiEJi/LizySDK
 
 ## 安装
 
 ```bash
-pip install -e .            # 本地开发安装
-pip install -e .[dev]       # 附带 pytest
+pip install -e .            # 本地开发安装（核心零依赖）
+pip install -e .[dev]       # 附带 pytest 与 web 适配测试依赖
+pip install -e .[web]       # FastAPI/Flask 适配器
 ```
 
 ## 快速开始
@@ -30,6 +31,11 @@ new_prefixed_id("ORD") # 'ORD_7350283750400000001'  业务前缀 ID
 
 gen = IDGenerator(worker_id=3)   # 自定义 worker（0~1023），线程安全
 gen.batch(10000)                 # 单次持锁批量生成
+
+new_sortable_id()                # '01jb2xk3m8...q7' ULID 风格 26 字符，字典序即时间序
+sortable_id_timestamp(uid)       # 反解该 ID 的 Unix 秒（含毫秒）
+resolve_worker_id()              # 多实例部署免手工分配 worker_id：
+                                 # 环境变量 LIZYSDK_WORKER_ID 优先，否则本机锁文件自动占位
 ```
 
 雪花位布局：`[1 bit 保留][41 bit 毫秒时间戳][10 bit worker_id][12 bit 序列]`，
@@ -114,6 +120,30 @@ ensure(user.is_admin, ErrorCode.PERMISSION_DENIED, required_permission="admin")
 9 个标准子类：`ParamError` `AuthError` `PermissionDeniedError` `NotFoundError` `ConflictError`
 `RateLimitError` `InternalError` `ServiceUnavailableError` `UpstreamTimeoutError`。
 
+**业务错误码动态注册**（15 个通用码之外，业务码声明式扩展）：
+
+```python
+from lizysdk import register_code, AppError
+
+register_code("PAY_BALANCE_NOT_ENOUGH", "余额不足: {amount} 元", 422)
+raise AppError("PAY_BALANCE_NOT_ENOUGH", params={"amount": "3.5"})
+# AppError: [PAY_BALANCE_NOT_ENOUGH] 余额不足: 3.5 元, http_status=422
+```
+
+解析优先级：**注册表 → 内置枚举 → 未知兜底 500**；`overwrite=True` 可覆盖内置码。
+`err.to_dict(include_cause=True)` 可附带底层异常的类型/消息/完整 traceback。
+
+**Web 框架适配器**（`pip install lizysdk[web]`，AppError 自动转 JSON 响应）：
+
+```python
+from fastapi import FastAPI
+from lizysdk.ext import install_fastapi_handler     # Flask 同理 install_flask_handler
+
+app = install_fastapi_handler(FastAPI(), include_generic=True)
+# 抛出 AppError 子类 → 响应状态码 = http_status，body = err.to_dict()
+# 未知异常（include_generic=True）→ 500 + INTERNAL_ERROR
+```
+
 ### 4. 三者协同
 
 ```python
@@ -138,10 +168,12 @@ except bk.AppError as exc:
 ```
 lizysdk/
 ├── src/lizysdk/
-│   ├── ids/        # snowflake.py 雪花生成器 · trace.py trace_id/uid（位数可选）
+│   ├── ids/        # snowflake.py 雪花 · trace.py trace_id/uid · ulid.py 可排序ID · worker.py worker协商
 │   ├── logs/       # formatter.py 格式与解析 · logger.py PipeLogger
 │   │               # handlers.py 轮转/后台写入池/发送派发 · sender.py HTTP 发送 · context.py 上下文
-│   └── errors/     # codes.py 错误码 · base.py AppError · standard.py 子类 · utils.py wrap/ensure
+│   ├── errors/     # codes.py 错误码 · registry.py 业务码注册表 · base.py AppError
+│   │               # standard.py 子类 · utils.py wrap/ensure
+│   └── ext/        # fastapi_adapter.py · flask_adapter.py（可选依赖组 [web]）
 ├── tests/          # test_ids / test_logs / test_errors / test_integration
 └── examples/demo.py
 ```
@@ -162,6 +194,9 @@ python examples/demo.py                               # 端到端冒烟
 
 ## 变更记录
 
+- **0.3.0** —— errors：业务错误码注册表 `register_code`/`unregister_code`/`registered_codes`、
+  `to_dict(include_cause=...)`、FastAPI/Flask 适配器（`lizysdk.ext`，可选组 `[web]`）；
+  ids：`new_sortable_id`（ULID 可排序 ID）、`resolve_worker_id`（env + 本机锁文件协商）
 - **0.2.0** —— trace_id 默认 16 位、位数可选（8~64）；新增 `new_uid`；日志新增
   `sys_name` 标识、`json_format` JSONL 输出、`send_json`/`send_url` 打印完即发送、
   `send_stats` 诊断；`parse_line` 支持 pipe/JSON 双格式；包更名为 lizysdk

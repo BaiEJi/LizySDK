@@ -3,6 +3,7 @@
 分层结构：
 
 - :mod:`lizysdk.errors.codes`    —— ``ErrorCode`` 错误码注册表（码名/模板/HTTP 状态）
+- :mod:`lizysdk.errors.registry` —— 业务错误码动态注册表（``register_code`` 等，优先于枚举）
 - :mod:`lizysdk.errors.base`     —— ``AppError`` 异常基类（模板渲染、序列化往返）
 - :mod:`lizysdk.errors.standard` —— 按 HTTP 语义预置的标准子类
 - :mod:`lizysdk.errors.utils`    —— ``wrap`` 异常包装 / ``ensure`` 断言式抛错
@@ -18,6 +19,7 @@ from __future__ import annotations
 
 from .base import AppError
 from .codes import ErrorCode
+from .registry import register_code, registered_codes, unregister_code
 from .standard import (
     AuthError,
     ConflictError,
@@ -45,4 +47,7 @@ __all__ = [
     "UpstreamTimeoutError",
     "wrap",
     "ensure",
+    "register_code",
+    "unregister_code",
+    "registered_codes",
 ]

@@ -6,9 +6,10 @@
 
 `lizysdk` 是一个通用 Python 基础工具包，只做三件事，边界严格：
 
-1. **`lizysdk.ids`** —— trace_id / 通用唯一 ID（hex 字符串，**位数可选 8~64，trace_id 默认 16**）与雪花唯一 ID（64 位整数 / 业务前缀 ID）
+1. **`lizysdk.ids`** —— trace_id / 通用唯一 ID（hex 字符串，**位数可选 8~64，trace_id 默认 16**）、雪花唯一 ID（64 位整数 / 业务前缀 ID）、ULID 可排序 ID（`new_sortable_id`）、worker_id 自动协商（`resolve_worker_id`）
 2. **`lizysdk.logs`** —— 结构化日志（**sys_name 系统标识**、pipe/JSON 双格式、轮转、后台写入池、线程安全、contextvars 上下文、**打印完即发送 JSON 到远端**）
-3. **`lizysdk.errors`** —— 标准化错误体系（错误码枚举、AppError、标准子类、wrap/ensure）
+3. **`lizysdk.errors`** —— 标准化错误体系（错误码枚举、**业务码动态注册表**、AppError、标准子类、wrap/ensure）
+4. **`lizysdk.ext`** —— Web 框架适配器（FastAPI/Flask 的 AppError 异常处理，**可选依赖组 `[web]`**）
 
 设计参考自 [BaiEJi/LzyTools](https://github.com/BaiEJi/LzyTools) 的 `basic_tool/id_generator` 与 `basic_tool/errors`，为独立发布重新实现（不共享代码）。
 
@@ -19,7 +20,8 @@
 - **全量类型注解**；公开 API 带中文 docstring（含可执行示例者优先，doctest 必须能过）。
 - **标识符英文、docstring/消息中文**；错误消息模板为中文。
 - **子包禁止叫 `logging`**（与标准库冲突），统一叫 `logs`。
-- **分层无循环导入**：errors 内部 `codes → base → standard/utils`；三个子包之间互不依赖（协同发生在应用层，如 `bind_context(trace_id=new_trace_id())`）。
+- **分层无循环导入**：errors 内部 `codes/registry → base → standard/utils`；三个核心子包之间互不依赖（协同发生在应用层，如 `bind_context(trace_id=new_trace_id())`）；`ext` 只依赖 errors。
+- **`ext` 子包铁律**：模块级**禁止** import 第三方库（fastapi/flask import 必须放在安装函数体内，未装时 `ImportError` 给中文提示 `pip install "lizysdk[web]"`）；核心包零依赖的红线不可破。
 - **线程安全**：一切跨线程共享状态必须持锁或使用 `contextvars`/`queue.Queue`，禁止全局可变状态裸奔。
 - **对外抛错统一 ValueError**（参数校验）；发送等 I/O 失败绝不向业务抛异常。
 
@@ -48,6 +50,13 @@ LEVEL||TIMESTAMP||FILE:LINE||sys_name=xxx||k1=v1||k2=v2||message=<文本>
 - 失败（连接拒绝/超时/DNS/非 2xx）绝不影响本地写盘、绝不抛给业务；`send_stats()` 返回 `{"sent","failed","last_error"}`（锁保护计数）。
 - `flush`/atexit 语义：先排空写队列、再尽力排空发送队列（受 `send_timeout` 约束）。
 
+### 错误码解析优先级（registry 引入后）
+
+`AppError` 对 code 的解析顺序恒为：**业务码注册表 → 内置 ErrorCode 枚举 → 未知兜底 500**。
+`register_code(code, template, http_status, *, overwrite=False)`：码名须匹配 `^[A-Z][A-Z0-9_]{1,63}$`、
+状态 100~599、与注册表或内置枚举重名都需 `overwrite=True`；全操作持锁。`to_dict()` 默认六键不变，
+`include_cause=True` 追加 `cause`（无 cause 时为 `None`）；`from_dict` 忽略 `cause` 键。
+
 ### API 契约
 
 顶层 `lizysdk.__init__` 聚合导出三个子包的全部公开名字（`__all__` 分组注释）。**新增/改名公开 API 的联动步骤**：子模块实现 → 子包 `__init__` 导出 → 顶层 `__init__` 导出 → `tests/test_integration.py` 断言 `__all__` 完整。
@@ -60,7 +69,9 @@ LEVEL||TIMESTAMP||FILE:LINE||sys_name=xxx||k1=v1||k2=v2||message=<文本>
 - `snowflake.py`：位宽常量 `1/41/10/12`（命名常量，勿写魔数）；移位 `WORKER_ID_SHIFT=12`、`TIMESTAMP_SHIFT=22`；默认纪元 `DEFAULT_EPOCH_MS = 1704067200000`（2024-01-01 UTC）。**雪花位数不可调**（位运算本质决定），docstring 已注明。
 - 线程安全：`new`/`batch` 全路径持 `threading.Lock`，`batch` 单次持锁。
 - 时钟回拨：≤10ms 自旋等待；>10ms 抛 `ClockBackwardsError(ValueError)`。
-- **可测试接缝**：时间通过模块级 `_current_ms()` 获取，测试用 monkeypatch + 脚本化时钟做确定性验证——改实现时必须保留该接缝。
+- **可测试接缝**：时间通过模块级 `_current_ms()`（snowflake）与 `_now_ms()`（ulid）获取，测试用 monkeypatch + 脚本化时钟做确定性验证——改实现时必须保留该接缝。
+- `ulid.py`：26 字符 Crockford base32 小写（字母表 ASCII 升序 ⇒ 定长字典序==数值序）；前 10 字符 48bit 毫秒时间戳 + 后 16 字符 80bit 随机；**同毫秒内随机段 +1 递增、时钟回拨沿用上一毫秒继续递增**，全程持锁保证「生成顺序==字典序（单线程严格递增）+ 全局唯一」。
+- `worker.py`：env（默认 `LIZYSDK_WORKER_ID`）显式指定优先且**完全不碰文件**；否则 `{lock_dir}/worker_{id}.json` 用 `os.open(O_CREAT|O_EXCL)` 原子占位、被占顺延、0..1023 全满抛 ValueError；陈旧回收**只按 mtime 年龄**（严禁在 Windows 用 `os.kill(pid,0)` 探活——sig=0 会触发 TerminateProcess）；atexit 释放、同进程重复调用幂等。
 
 ### logs（`src/lizysdk/logs/`）
 
@@ -76,12 +87,13 @@ LEVEL||TIMESTAMP||FILE:LINE||sys_name=xxx||k1=v1||k2=v2||message=<文本>
 - 模板渲染用 `format_map` + 安全字典：缺键保留 `{占位符}` 原样、多余键忽略，**绝不抛 KeyError**；显式 `message` 优先于模板。
 - `from_dict` 依赖 `__init_subclass__` 自动维护的类型注册表还原子类，未知/缺失 `type` 回落 `AppError` 本体。
 - `wrap()` 用 `setdefault` 写 `details["original_type"]`，不覆盖调用方已提供的键；`ensure()` 接受 码/实例 两种形态。
+- `registry.py` 只 import `codes.py`（`base.py` 单向引用 `registry`，无循环）；`ext/` 的两个适配器返回 `app` 可链式，`include_generic=True` 时额外把未知异常 `wrap()` 成 500。
 
 ## 开发工作流
 
 ```bash
 cd C:/Users/Lizy/Desktop/Code/basekit
-python -m pytest -v                                    # 全量测试（当前 225 个，必须全绿）
+python -m pytest -v                                    # 全量测试（当前 353 个，必须全绿）
 python -m pytest tests/test_logs.py -v                 # 单模块
 python -m pytest --doctest-modules src/lizysdk/errors  # docstring 示例验证
 python examples/demo.py                                # 端到端冒烟
@@ -101,5 +113,6 @@ python -m pip install -e .                             # 开发安装（可省�
 
 ## 变更记录
 
+- **0.3.0** —— errors：业务码注册表、include_cause、ext FastAPI/Flask 适配器；ids：ULID 可排序 ID、worker_id 协商
 - **0.2.0** —— trace_id 默认 16 位可选位数；新增 `new_uid`；日志 sys_name/JSONL/send_json 发送/send_stats；包更名 lizysdk
 - **0.1.0** —— 首版（原包名 basekit）

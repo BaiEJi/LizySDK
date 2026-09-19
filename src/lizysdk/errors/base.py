@@ -6,18 +6,24 @@
   完整描述一次错误，可直接序列化进日志或 HTTP 响应体；
 - ``message`` 未显式给出时，用 ``params`` 渲染错误码自带的消息模板
   （占位符缺键时安全降级，不抛 ``KeyError``）；
+- 码名解析优先级：动态注册表（:mod:`lizysdk.errors.registry`）-> ``ErrorCode``
+  枚举 -> 未知兜底（模板 ``None``、状态 500）；内置成员被 ``overwrite``
+  覆盖后同样以注册表为准；
 - ``to_dict`` / ``from_dict`` 支持结构化往返，``from_dict`` 依据 ``type``
-  字段还原具体子类，未知 ``type`` 落回 ``AppError`` 本体；
+  字段还原具体子类，未知 ``type`` 落回 ``AppError`` 本体；``to_dict``
+  可选序列化 ``__cause__``（见 ``include_cause`` 参数）；
 - 通过 ``__init_subclass__`` 自动登记子类，供 ``from_dict`` 按类名查找。
 """
 
 from __future__ import annotations
 
 import copy
+import traceback
 from datetime import datetime, timezone
 from typing import Any
 
 from .codes import ErrorCode
+from .registry import _lookup_code
 
 __all__ = ["AppError"]
 
@@ -39,12 +45,22 @@ class _SafeFormatDict(dict):
 def _resolve_code(code: ErrorCode | str) -> tuple[str, str | None, int]:
     """把 ``ErrorCode`` 或裸字符串解析为 ``(码名, 模板, HTTP 状态码)``。
 
-    裸字符串恰好命中已知错误码时沿用其模板与状态码；
-    否则模板为 ``None``、状态码按 500（INTERNAL_ERROR 语义）兜底。
+    解析优先级：动态注册表 -> ``ErrorCode`` 枚举 -> 未知兜底：
+
+    - ``ErrorCode`` 成员：先按其码名查注册表（被 ``overwrite`` 覆盖时以
+      注册表的模板 / 状态为准），未命中沿用成员自带的模板与状态码；
+    - 裸字符串：先查注册表（业务码），再匹配枚举（已知码沿用模板与状态码）；
+    - 均未命中：模板为 ``None``、状态码按 500（INTERNAL_ERROR 语义）兜底。
     """
     if isinstance(code, ErrorCode):
+        overridden = _lookup_code(code.value)
+        if overridden is not None:
+            return code.value, overridden[0], overridden[1]
         return code.value, code.template, code.http_status
     code_str = str(code)
+    overridden = _lookup_code(code_str)
+    if overridden is not None:
+        return code_str, overridden[0], overridden[1]
     try:
         matched = ErrorCode(code_str)
     except ValueError:
@@ -156,15 +172,40 @@ class AppError(Exception):
 
     # ---- 序列化往返 ----
 
-    def to_dict(self) -> dict:
+    def to_dict(self, *, include_cause: bool = False) -> dict:
         """导出可直接 ``json.dumps`` 的字典（details 为深拷贝，互不影响）。
+
+        ``include_cause`` 的行为（默认 ``False``，与历史行为完全一致，
+        输出仅含 ``type/code/message/http_status/details/timestamp`` 六键）：
+
+        - ``include_cause=True`` 且存在 ``__cause__``（异常链上的原始异常）时，
+          追加键 ``"cause"``::
+
+              {"type": 异常类名, "message": str(cause),
+               "traceback": traceback.format_exception 合成的单字符串}
+
+        - ``include_cause=True`` 但无 ``__cause__`` 时，键存在且值为 ``None``
+          （本实现固定选择「键存在、值为 None」而非缺席，便于消费方统一取键）。
+
+        :meth:`from_dict` 对 ``"cause"`` 键一律忽略，不会还原异常链。
 
         示例：
             >>> from lizysdk.errors import AppError
             >>> AppError("CUSTOM_CODE", "自定义消息").to_dict()["code"]
             'CUSTOM_CODE'
+            >>> try:
+            ...     raise ValueError("boom")
+            ... except ValueError as inner:
+            ...     from lizysdk.errors import wrap
+            ...     err = wrap(inner, message="外部错误")
+            >>> d = err.to_dict(include_cause=True)
+            >>> d["cause"]["type"], d["cause"]["message"]
+            ('ValueError', 'boom')
+
+        :param include_cause: 是否序列化 ``__cause__``（默认 ``False``）
+        :return: 可直接 ``json.dumps`` 的字典
         """
-        return {
+        result: dict = {
             "type": type(self).__name__,
             "code": self._code,
             "message": self._message,
@@ -172,6 +213,21 @@ class AppError(Exception):
             "details": copy.deepcopy(self._details),
             "timestamp": self._timestamp,
         }
+        if include_cause:
+            cause = self.__cause__
+            if cause is None:
+                result["cause"] = None
+            else:
+                result["cause"] = {
+                    "type": type(cause).__name__,
+                    "message": str(cause),
+                    "traceback": "".join(
+                        traceback.format_exception(
+                            type(cause), cause, cause.__traceback__
+                        )
+                    ),
+                }
+        return result
 
     @classmethod
     def from_dict(cls, d: dict) -> AppError:

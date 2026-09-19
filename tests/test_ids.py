@@ -15,13 +15,28 @@
 6. batch：count<=0 抛 ValueError，batch(N) 长度为 N；
 7. 时钟回拨：通过 monkeypatch snowflake._current_ms 接缝模拟回拨，
    小幅回拨自旋等待、大幅回拨抛 ClockBackwardsError；
-8. 默认实例与自建实例互不干扰。
+8. 默认实例与自建实例互不干扰；
+9. ULID 可排序 ID（new_sortable_id / sortable_id_timestamp）：长度 26、
+   Crockford base32 小写字符集、10 万次唯一、单线程 10 万次严格单调
+   （排序后与原序列一致）、8 线程 x 1 万次全唯一、时间戳反解偏差 < 2s、
+   非法 uid（长度错 / 含 i o l u / 非 str）抛 ValueError、冻结毫秒的
+   同毫秒计数器语义（monkeypatch ulid._now_ms 接缝）、跨毫秒边界单调；
+10. worker_id 自动协商（resolve_worker_id）：环境变量优先（合法值含
+    边界 0/1023 直接返回且零文件探测、非法值抛 ValueError 含变量名、
+    自定义变量名）、锁文件占位（内容含当前 pid 与 ISO8601 created）、
+    被占顺延、陈旧回收（mtime 改旧）与新锁不回收、全满抛 ValueError、
+    同进程重复调用幂等、atexit 释放函数删文件且可重复协商、锁目录
+    不可写抛中文 OSError、default 参数非法抛 ValueError。
 """
 
 from __future__ import annotations
 
+import json
+import os
 import re
 import threading
+import time
+from datetime import datetime
 from typing import Callable, List
 
 import pytest
@@ -32,10 +47,14 @@ from lizysdk.ids import (
     IDGenerator,
     new_id,
     new_prefixed_id,
+    new_sortable_id,
     new_trace_id,
     new_uid,
+    resolve_worker_id,
+    sortable_id_timestamp,
 )
 from lizysdk.ids import snowflake
+from lizysdk.ids import ulid, worker
 
 # ---------------------------------------------------------------------------
 # 测试辅助
@@ -133,13 +152,29 @@ def test_random_id_exact_length_and_charset(
         assert set(value) <= _HEX_CHARS, f"非法字符集: {value}"
 
 
+def _unique_samples(length: int) -> int:
+    """按位数返回可做「严格唯一」断言的采样量。
+
+    生日悖论下 n 次采样碰撞概率 P ≈ n² / (2·16^length)；位数越短空间越小，
+    必须等比缩水采样量，否则测试会以约 1% 的概率随机失败（8 位 × 1 万次
+    在 32bit 空间的碰撞概率 ≈ 1.16%）。以下取值均保证 P < 1e-6。
+    """
+    if length >= 16:
+        return 10_000
+    if length >= 12:
+        return 3_000
+    if length >= 10:
+        return 500
+    return 60  # 8~9 位（32~36bit）：60 次碰撞概率约 4e-7
+
+
 @pytest.mark.parametrize("length", _VALID_LENGTHS)
 @pytest.mark.parametrize("factory", _ID_FACTORIES, ids=["trace_id", "uid"])
-def test_random_id_unique_10k_per_length(
+def test_random_id_unique_per_length_scaled(
     factory: Callable[..., str], length: int
 ) -> None:
-    """同一长度连续 1 万次生成不应出现重复。"""
-    total = 10_000
+    """同一长度连续生成不应重复（采样量按位数熵缩放）。"""
+    total = _unique_samples(length)
     values = {factory(length) for _ in range(total)}
     assert len(values) == total
 
@@ -454,3 +489,332 @@ def test_bit_width_constants() -> None:
     assert snowflake.MAX_WORKER_ID == 1023
     assert snowflake.MAX_SEQUENCE == 4095
     assert snowflake.DEFAULT_EPOCH_MS == 1704067200000  # 2024-01-01T00:00:00Z
+
+
+def test_public_api_surface_new_modules() -> None:
+    """新增两个子模块的 API 必须按契约从 lizysdk.ids 导出。"""
+    required = {
+        "new_sortable_id",
+        "sortable_id_timestamp",
+        "resolve_worker_id",
+    }
+    for name in required:
+        assert hasattr(lizysdk.ids, name), f"缺少导出: {name}"
+        assert name in lizysdk.ids.__all__
+
+
+# ---------------------------------------------------------------------------
+# 9. ULID 可排序字符串 ID（new_sortable_id / sortable_id_timestamp）
+# ---------------------------------------------------------------------------
+
+_CROCKFORD_CHARS = frozenset(ulid.CROCKFORD_ALPHABET)
+
+
+def test_ulid_length_26_and_charset() -> None:
+    """每个 ID 长度恒为 26，且仅含 Crockford base32 小写字符。"""
+    for _ in range(1000):
+        uid = new_sortable_id()
+        assert len(uid) == 26
+        assert uid == uid.lower()
+        assert set(uid) <= _CROCKFORD_CHARS, f"非法字符集: {uid}"
+
+
+def test_ulid_unique_100k() -> None:
+    """连续 10 万次生成不应出现重复。"""
+    total = 100_000
+    values = {new_sortable_id() for _ in range(total)}
+    assert len(values) == total
+
+
+def test_ulid_single_thread_strictly_monotonic_100k() -> None:
+    """单线程 10 万次：排序后与原序列完全一致（生成顺序 == 字典序）。"""
+    ids = [new_sortable_id() for _ in range(100_000)]
+    assert sorted(ids) == ids
+    assert all(ids[k] < ids[k + 1] for k in range(len(ids) - 1))
+
+
+def test_ulid_8threads_10k_all_unique() -> None:
+    """8 线程 x 1 万次并发生成，汇总 8 万个 ID 全唯一。"""
+
+    def work(_idx: int) -> List[str]:
+        return [new_sortable_id() for _ in range(10_000)]
+
+    results = _run_concurrently(work, 8)
+    merged = [uid for chunk in results for uid in chunk]
+    assert len(merged) == 80_000
+    assert len(set(merged)) == 80_000
+
+
+def test_ulid_timestamp_close_to_now() -> None:
+    """反解出的 Unix 秒与 time.time() 偏差小于 2 秒。"""
+    uid = new_sortable_id()
+    assert abs(sortable_id_timestamp(uid) - time.time()) < 2
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "",  # 空串
+        "0" * 25,  # 长度不足
+        "0" * 27,  # 长度超长
+        "i" + "0" * 25,  # 非法字符 i（Crockford 排除）
+        "0" * 13 + "l" + "0" * 12,  # 非法字符 l
+        "0" * 25 + "o",  # 非法字符 o
+        "0" * 10 + "u" + "0" * 15,  # 非法字符 u
+        "01arz3ndektsv4gfftd8g5hxv" + "I",  # 大写同样非法
+        123,  # 非 str
+        None,  # 非 str
+        b"0" * 26,  # 非 str
+    ],
+)
+def test_ulid_timestamp_invalid_uid_raises(bad: object) -> None:
+    """非法 uid（长度错 / 含 i l o u / 非 str）应抛 ValueError。"""
+    with pytest.raises(ValueError):
+        sortable_id_timestamp(bad)  # type: ignore[arg-type]
+
+
+def test_ulid_timestamp_decodes_known_values() -> None:
+    """已知样本反解：全零对应纪元 0，7zzzzzzzzz 对应 48bit 上界。"""
+    assert sortable_id_timestamp("0" * 26) == 0.0
+    # '7' + 'z'*9 恰为 2^48 - 1（8 * 32^9 - 1），随机段不影响时间戳
+    assert sortable_id_timestamp("7" + "z" * 9 + "0" * 16) == (2**48 - 1) / 1000
+    # ULID 标准文档示例（转小写）：时间戳应为 2016 年附近的合法过去时间
+    ts = sortable_id_timestamp("01arz3ndektsv4gfftd8g5hxv9")
+    assert 1_400_000_000 < ts < time.time() + 5
+
+
+def test_ulid_layout_constants() -> None:
+    """布局常量自洽：26 字符、字符表 32 个且升序、位宽推导正确。"""
+    assert ulid.ULID_LENGTH == 26
+    assert ulid.TIMESTAMP_CHARS + ulid.RANDOMNESS_CHARS == 26
+    assert ulid.TIMESTAMP_CHARS * ulid.BITS_PER_CHAR >= ulid.TIMESTAMP_BITS
+    assert ulid.RANDOMNESS_CHARS * ulid.BITS_PER_CHAR == ulid.RANDOMNESS_BITS
+    assert len(ulid.CROCKFORD_ALPHABET) == 32
+    # 排除 i / l / o / u
+    assert set("ilou") & set(ulid.CROCKFORD_ALPHABET) == set()
+    # 字母表本身按 ASCII 升序：字典序 == 数值序的前提
+    assert sorted(ulid.CROCKFORD_ALPHABET) == list(ulid.CROCKFORD_ALPHABET)
+
+
+def _freeze_ulid_clock(monkeypatch: pytest.MonkeyPatch, ms_values: List[int]) -> None:
+    """冻结 / 脚本化 ulid 时间接缝并重置发号状态（teardown 自动还原）。"""
+    monkeypatch.setattr(ulid, "_now_ms", ScriptedClock(ms_values))
+    monkeypatch.setattr(ulid, "_last_ms", -1)
+    monkeypatch.setattr(ulid, "_last_randomness", -1)
+
+
+def test_ulid_same_ms_counter_semantics(monkeypatch: pytest.MonkeyPatch) -> None:
+    """冻结毫秒：同毫秒内前缀相同、后缀（随机段）严格递增、全唯一。"""
+    frozen_ms = 10_000_000_000_000  # 任意合法 48bit 毫秒值
+    _freeze_ulid_clock(monkeypatch, [frozen_ms])
+
+    n = 500
+    ids = [new_sortable_id() for _ in range(n)]
+
+    prefixes = {uid[:10] for uid in ids}
+    suffixes = [uid[10:] for uid in ids]
+    assert len(prefixes) == 1  # 同一毫秒：时间戳前缀完全相同
+    assert all(suffixes[k] < suffixes[k + 1] for k in range(n - 1))  # 严格递增
+    assert suffixes == sorted(suffixes)
+    assert len(set(ids)) == n  # 全唯一
+    # 时间戳前缀反解回冻结值
+    assert sortable_id_timestamp(ids[0]) == frozen_ms / 1000
+
+
+def test_ulid_monotonic_across_ms_boundary(monkeypatch: pytest.MonkeyPatch) -> None:
+    """跨毫秒：前缀切换为新毫秒且整体仍严格递增、同毫秒段内递增。"""
+    t0 = 10_000_000_000_000
+    _freeze_ulid_clock(monkeypatch, [t0, t0, t0, t0 + 1, t0 + 1, t0 + 1])
+
+    ids = [new_sortable_id() for _ in range(6)]
+
+    assert ids == sorted(ids)  # 整体严格递增
+    assert len({uid[:10] for uid in ids}) == 2  # 恰好两个毫秒前缀
+    assert ids[2][:10] < ids[3][:10]  # 跨毫秒后前缀变大
+    # 各毫秒段内部后缀递增
+    assert ids[0][10:] < ids[1][10:] < ids[2][10:]
+    assert ids[3][10:] < ids[4][10:] < ids[5][10:]
+
+
+# ---------------------------------------------------------------------------
+# 10. worker_id 自动协商（resolve_worker_id）
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def clean_worker_state(monkeypatch: pytest.MonkeyPatch):
+    """worker 协商测试的隔离夹具：清空进程内占用状态 + 移除默认环境变量。
+
+    前后各释放一次（幂等），保证每个用例从「未协商」状态起步、结束后
+    不把锁文件状态泄漏给后续用例。
+    """
+    worker._release_lock()
+    monkeypatch.delenv("LIZYSDK_WORKER_ID", raising=False)
+    yield
+    worker._release_lock()
+
+
+@pytest.mark.parametrize("value", ["0", "7", "1023", " 42 "])
+def test_worker_env_var_valid_returns_directly(
+    tmp_path, clean_worker_state, monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    """环境变量为合法值（含边界 0/1023）直接返回，且不做任何文件探测。"""
+    monkeypatch.setenv("LIZYSDK_WORKER_ID", value)
+    lock_dir = tmp_path / "locks"
+    assert resolve_worker_id(lock_dir=lock_dir) == int(value)
+    # 显式指定时不做文件探测：锁目录根本不会被创建
+    assert not lock_dir.exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_worker_env_var_skips_probing_even_if_lock_dir_broken(
+    tmp_path, clean_worker_state, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """env 指定时连「不可用的 lock_dir」也不会被触碰。"""
+    monkeypatch.setenv("LIZYSDK_WORKER_ID", "5")
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a dir", encoding="utf-8")
+    assert resolve_worker_id(lock_dir=blocker / "locks") == 5
+
+
+@pytest.mark.parametrize("value", ["abc", "12.5", "-1", "1024", "0x1", "  ", ""])
+def test_worker_env_var_invalid_raises(
+    tmp_path, clean_worker_state, monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    """环境变量非数字 / 越界应抛 ValueError，且消息含变量名。"""
+    monkeypatch.setenv("LIZYSDK_WORKER_ID", value)
+    with pytest.raises(ValueError, match="LIZYSDK_WORKER_ID"):
+        resolve_worker_id(lock_dir=tmp_path / "locks")
+
+
+def test_worker_custom_env_var_name(
+    tmp_path, clean_worker_state, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """env_var 可自定义：只读指定变量，默认变量即使为垃圾也不受影响。"""
+    monkeypatch.setenv("MY_TEST_WID", "9")
+    monkeypatch.setenv("LIZYSDK_WORKER_ID", "not-a-number")
+    assert (
+        resolve_worker_id(env_var="MY_TEST_WID", lock_dir=tmp_path / "locks") == 9
+    )
+
+
+def test_worker_claims_from_default_with_pid_created(
+    tmp_path, clean_worker_state
+) -> None:
+    """无 env 时从 default 起占位成功，锁文件内容含当前 pid 与 ISO8601。"""
+    lock_dir = tmp_path / "locks"
+    assert resolve_worker_id(lock_dir=lock_dir) == 0
+
+    path = lock_dir / "worker_0.json"
+    assert path.exists()
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["pid"] == os.getpid()
+    created = datetime.fromisoformat(data["created"])  # 合法 ISO8601
+    assert created.tzinfo is not None
+    assert abs(created.timestamp() - time.time()) < 60
+
+
+def test_worker_occupied_advances_to_next(tmp_path, clean_worker_state) -> None:
+    """起始 id 已被占用时应顺延到下一个空闲 id。"""
+    lock_dir = tmp_path / "locks"
+    lock_dir.mkdir()
+    (lock_dir / "worker_0.json").write_text('{"pid": 1}', encoding="utf-8")
+    (lock_dir / "worker_1.json").write_text('{"pid": 1}', encoding="utf-8")
+
+    assert resolve_worker_id(lock_dir=lock_dir) == 2
+    assert (lock_dir / "worker_2.json").exists()
+    assert json.loads((lock_dir / "worker_2.json").read_text())["pid"] == os.getpid()
+
+
+def test_worker_custom_default_start(tmp_path, clean_worker_state) -> None:
+    """default=3 且 worker_3 被占时应占 worker_4。"""
+    lock_dir = tmp_path / "locks"
+    lock_dir.mkdir()
+    (lock_dir / "worker_3.json").write_text('{"pid": 1}', encoding="utf-8")
+
+    assert resolve_worker_id(default=3, lock_dir=lock_dir) == 4
+
+
+def test_worker_stale_lock_reclaimed(tmp_path, clean_worker_state) -> None:
+    """mtime 超过阈值的陈旧锁应被回收重占（删除后写入了本进程 pid）。"""
+    lock_dir = tmp_path / "locks"
+    lock_dir.mkdir()
+    stale = lock_dir / "worker_0.json"
+    stale.write_text('{"pid": 123}', encoding="utf-8")
+    old = time.time() - 7200  # 2 小时前
+    os.utime(stale, (old, old))
+
+    assert resolve_worker_id(lock_dir=lock_dir, stale_after_seconds=3600) == 0
+    assert json.loads(stale.read_text())["pid"] == os.getpid()
+
+
+def test_worker_fresh_lock_not_reclaimed(tmp_path, clean_worker_state) -> None:
+    """mtime 较新的锁不是陈旧锁：不回收，顺延到下一个 id。"""
+    lock_dir = tmp_path / "locks"
+    lock_dir.mkdir()
+    fresh = lock_dir / "worker_0.json"
+    fresh.write_text('{"pid": 123}', encoding="utf-8")
+    recent = time.time() - 60  # 1 分钟前，远未到 1 小时阈值
+    os.utime(fresh, (recent, recent))
+
+    assert resolve_worker_id(lock_dir=lock_dir, stale_after_seconds=3600) == 1
+    assert json.loads(fresh.read_text())["pid"] == 123  # 原锁未被破坏
+
+
+def test_worker_all_slots_full_raises(tmp_path, clean_worker_state) -> None:
+    """0..1023 全部被占时应抛 ValueError（中文消息说明探测范围）。"""
+    lock_dir = tmp_path / "locks"
+    lock_dir.mkdir()
+    for i in range(1024):
+        (lock_dir / f"worker_{i}.json").write_text('{"pid": 1}', encoding="utf-8")
+
+    with pytest.raises(ValueError, match=r"槽位已全部被占用.*\[0, 1023\]"):
+        resolve_worker_id(lock_dir=lock_dir)
+
+
+def test_worker_repeated_calls_idempotent(tmp_path, clean_worker_state) -> None:
+    """同进程重复调用幂等：返回同一 id，锁文件数量不增加。"""
+    lock_dir = tmp_path / "locks"
+    first = resolve_worker_id(lock_dir=lock_dir)
+    assert resolve_worker_id(lock_dir=lock_dir) == first
+    # 已占用槽位时 default 参数被忽略，仍返回已占用的 id
+    assert resolve_worker_id(default=first + 1, lock_dir=lock_dir) == first
+
+    files = sorted(p.name for p in lock_dir.iterdir())
+    assert files == [f"worker_{first}.json"]  # 不泄漏多个锁文件
+
+
+def test_worker_release_lock_removes_file_and_allows_renegotiate(
+    tmp_path, clean_worker_state
+) -> None:
+    """显式调用内部释放函数（atexit 注册的同款）验证：删文件、幂等、可再协商。"""
+    lock_dir = tmp_path / "locks"
+    wid = resolve_worker_id(lock_dir=lock_dir)
+    path = lock_dir / f"worker_{wid}.json"
+    assert path.exists()
+
+    worker._release_lock()
+    assert not path.exists()
+    worker._release_lock()  # 幂等：重复释放不抛错
+
+    # 释放后可再次协商（重新占位同一目录）
+    assert resolve_worker_id(lock_dir=lock_dir) == wid
+
+
+def test_worker_unwritable_lock_dir_raises_clear_error(
+    tmp_path, clean_worker_state
+) -> None:
+    """lock_dir 不可写（路径被普通文件占据）应抛中文 OSError，而非静默。"""
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a dir", encoding="utf-8")
+    with pytest.raises(OSError, match="锁目录"):
+        resolve_worker_id(lock_dir=blocker)
+
+
+@pytest.mark.parametrize("bad", [-1, 1024, 999_999, "3", 1.5, True])
+def test_worker_invalid_default_raises(
+    tmp_path, clean_worker_state, bad: object
+) -> None:
+    """default 非法（越界 / 非 int / bool）应抛 ValueError。"""
+    with pytest.raises(ValueError):
+        resolve_worker_id(default=bad, lock_dir=tmp_path / "locks")  # type: ignore[arg-type]

@@ -1,18 +1,18 @@
-"""lizysdk：通用 Python 基础工具包（零第三方依赖，Python 3.9+）。
+"""lizysdk：通用 Python 基础工具包（核心零第三方依赖，Python 3.9+）。
 
-三个子模块：
+四个子模块：
 
 - :mod:`lizysdk.ids`    —— trace_id / 唯一 ID 生成（位数可选）+ 雪花分布式 ID
+  + ULID 可排序 ID + worker_id 自动协商
 - :mod:`lizysdk.logs`   —— 结构化日志（sys_name 标识、pipe/JSON 双格式、轮转、
   后台写入池、打印完即发送 JSON 到远端）
-- :mod:`lizysdk.errors` —— 标准化错误体系（错误码 / 模板消息 / 序列化往返）
+- :mod:`lizysdk.errors` —— 标准化错误体系（错误码 / 业务码动态注册表 / 模板消息 /
+  序列化往返 / wrap·ensure）
+- :mod:`lizysdk.ext`    —— Web 框架适配器（FastAPI/Flask，需 ``pip install lizysdk[web]``）
 
 一行日志的格式契约（``message`` 恒为最后一段）::
 
     LEVEL||TIMESTAMP||FILE:LINE||sys_name=xxx||k1=v1||k2=v2||message=<文本>
-
-``json_format=True`` 时输出 JSONL；``send_json=True`` 时每条日志打印完即以
-JSON POST 到 ``send_url``（body 含 sys_name 与全部字段）。
 
 快速上手::
 
@@ -29,6 +29,7 @@ JSON POST 到 ``send_url``（body 含 sys_name 与全部字段）。
 
 from __future__ import annotations
 
+from . import ext
 from .errors import (
     AppError,
     AuthError,
@@ -42,6 +43,9 @@ from .errors import (
     ServiceUnavailableError,
     UpstreamTimeoutError,
     ensure,
+    register_code,
+    registered_codes,
+    unregister_code,
     wrap,
 )
 from .ids import (
@@ -52,8 +56,11 @@ from .ids import (
     MAX_WORKER_ID,
     new_id,
     new_prefixed_id,
+    new_sortable_id,
     new_trace_id,
     new_uid,
+    resolve_worker_id,
+    sortable_id_timestamp,
 )
 from .logs import (
     PipeLogger,
@@ -67,7 +74,7 @@ from .logs import (
     setup_logging,
 )
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     # ids —— 唯一 ID / trace_id
@@ -75,6 +82,9 @@ __all__ = [
     "new_uid",
     "new_id",
     "new_prefixed_id",
+    "new_sortable_id",
+    "sortable_id_timestamp",
+    "resolve_worker_id",
     "IDGenerator",
     "ClockBackwardsError",
     "DEFAULT_EPOCH_MS",
@@ -104,4 +114,9 @@ __all__ = [
     "UpstreamTimeoutError",
     "wrap",
     "ensure",
+    "register_code",
+    "unregister_code",
+    "registered_codes",
+    # ext —— Web 框架适配（可选依赖组 lizysdk[web]）
+    "ext",
 ]
