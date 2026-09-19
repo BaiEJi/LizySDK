@@ -72,6 +72,10 @@ MAX_RANDOMNESS: int = (1 << RANDOMNESS_BITS) - 1
 #: 字符 -> 数值 的反查表（sortable_id_timestamp 解码用）
 _CHAR_INDEX: dict[str, int] = {ch: i for i, ch in enumerate(CROCKFORD_ALPHABET)}
 
+#: 时间戳段字符串的单槽缓存 ``(毫秒, 编码文本)``：同一毫秒内所有 ID 的
+#: 前 10 字符完全相同，写侧原子替换，读侧竞态只会多编码一次。
+_TS_PART_CACHE: list = [None]
+
 
 def _now_ms() -> int:
     """返回当前 Unix 时间戳（毫秒）。
@@ -97,6 +101,11 @@ def _encode(value: int, length: int) -> str:
     Raises:
         ValueError: ``value`` 为负或超出 ``length`` 个字符的编码容量。
     """
+    return _encode_impl(value, length)
+
+
+def _encode_impl(value: int, length: int) -> str:
+    """:func:`_encode` 的权威实现（divmod 循环，同时用于构建查表）。"""
     if value < 0 or value >= (1 << (length * BITS_PER_CHAR)):
         raise ValueError(
             f"value 必须在 [0, {1 << (length * BITS_PER_CHAR) - 1}] 内，"
@@ -107,6 +116,40 @@ def _encode(value: int, length: int) -> str:
         value, rem = divmod(value, len(CROCKFORD_ALPHABET))
         chars[i] = CROCKFORD_ALPHABET[rem]
     return "".join(chars)
+
+
+#: 2 字符组合查表（10 bit -> 2 字符）：热路径编码由 16 次 divmod 循环
+#: 降为 8 次移位 + 查表（表在导入期用权威实现 :func:`_encode_impl` 构建）
+_PAIR_TABLE: "tuple[str, ...]" = tuple(
+    _encode_impl(i, 2) for i in range(1 << (2 * BITS_PER_CHAR))
+)
+
+
+def _encode_randomness(value: int) -> str:
+    """80 bit 随机段 -> 16 字符（热路径：8 次移位 + 2 字符查表）。"""
+    table = _PAIR_TABLE
+    return "".join(
+        (
+            table[(value >> 70) & 0x3FF],
+            table[(value >> 60) & 0x3FF],
+            table[(value >> 50) & 0x3FF],
+            table[(value >> 40) & 0x3FF],
+            table[(value >> 30) & 0x3FF],
+            table[(value >> 20) & 0x3FF],
+            table[(value >> 10) & 0x3FF],
+            table[value & 0x3FF],
+        )
+    )
+
+
+def _timestamp_part(ts_ms: int) -> str:
+    """时间戳段（前 10 字符），按毫秒单槽缓存。"""
+    cached = _TS_PART_CACHE[0]
+    if cached is not None and cached[0] == ts_ms:
+        return cached[1]
+    text = _encode_impl(ts_ms, TIMESTAMP_CHARS)
+    _TS_PART_CACHE[0] = (ts_ms, text)
+    return text
 
 
 # ---------------------------------------------------------------------------
@@ -173,9 +216,7 @@ def new_sortable_id() -> str:
             )
         _last_ms = ts_ms
         _last_randomness = randomness
-        return _encode(ts_ms, TIMESTAMP_CHARS) + _encode(
-            randomness, RANDOMNESS_CHARS
-        )
+        return _timestamp_part(ts_ms) + _encode_randomness(randomness)
 
 
 def sortable_id_timestamp(uid: str) -> float:

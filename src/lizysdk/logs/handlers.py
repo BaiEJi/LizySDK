@@ -54,6 +54,22 @@ class _PipeQueueHandler(logging.handlers.QueueHandler):
         """原样返回 record（保留 ``exc_info`` 与 ``bk_fields``）。"""
         return record
 
+    def emit(self, record: logging.LogRecord) -> None:
+        """直接原样入队（``prepare`` 恒等，省去一次间接调用）。"""
+        self.enqueue(record)
+
+    def enqueue(self, record: logging.LogRecord) -> None:
+        """SimpleQueue 友好入队（``put`` 为 C 实现，不持 Python 级互斥锁）。"""
+        self.queue.put(record)
+
+    def handle(self, record: logging.LogRecord) -> None:
+        """跳过过滤器与 handler 锁直达 enqueue。
+
+        本 handler 是内部管道组件（无过滤器可装），队列入队自身线程安全，
+        标准 :meth:`handle` 的 RLock 加解锁在热路径上是纯开销。
+        """
+        self.emit(record)
+
 
 class _SendHandler(logging.Handler):
     """「打印完即发送」handler：把记录编码为 JSON 后派发到远端通道。
@@ -93,32 +109,44 @@ class _SendHandler(logging.Handler):
 
 
 class _JoinableQueueListener(logging.handlers.QueueListener):
-    """保证消费后调用 ``queue.task_done()`` 的 ``QueueListener``。
+    """后台单消费线程（自持 monitor，配 ``queue.SimpleQueue``）。
 
-    部分标准库版本（3.9 / 3.10 早期）的 ``_monitor`` 不调用 ``task_done``，
-    ``queue.join()`` 将永远阻塞。此处自持 monitor 逻辑：
-
-    - 每条记录（含哨兵）处理后必定 ``task_done()``，:func:`flush` 可靠；
-    - 单条记录处理异常不会杀死消费线程（打印堆栈后继续）。
+    - 队列为 :class:`queue.SimpleQueue`（C 实现）：``put`` 不持 Python
+      互斥锁，生产/消费不会因队列锁反复让出 GIL；
+    - ``flush`` 采用 :class:`_FlushBarrier` 屏障令牌，而非逐条
+      ``task_done``（后者在部分标准库版本缺失，且共享计数锁引入
+      GIL 乒乓）；
+    - 停机令牌按 FIFO 排在剩余记录之后，退出前天然排空；
+    - 单条记录处理异常不会杀死消费线程。
     """
+
+    def __init__(self, q: "_queue.SimpleQueue", *handlers: logging.Handler) -> None:
+        super().__init__(q, *handlers)
+        self._stop_token = object()
 
     def _monitor(self) -> None:  # noqa: D102 - 见类 docstring
         q = self.queue
-        has_task_done = hasattr(q, "task_done")
         while True:
             try:
                 record = self.dequeue(True)
             except Exception:  # pragma: no cover - 队列本身故障时安全退出
                 break
             try:
-                if record is self._sentinel:
+                if record is self._stop_token:
                     break
+                if isinstance(record, _FlushBarrier):
+                    record.done()
+                    continue
                 self.handle(record)
             except Exception:  # 单条失败不拖垮消费线程
                 traceback.print_exc(file=sys.stderr)
-            finally:
-                if has_task_done:
-                    q.task_done()
+
+    def stop(self, timeout: Optional[float] = None) -> None:
+        """投递停机令牌并等待消费线程退出（令牌前的记录已全部处理）。"""
+        self.queue.put(self._stop_token)
+        thread = getattr(self, "_thread", None)
+        if thread is not None:
+            thread.join(timeout)
 
 
 class _WorkerPool:
@@ -151,6 +179,8 @@ class _WorkerPool:
             t.start()
 
     def _run(self) -> None:
+        # 多 worker 下不能用屏障令牌（令牌被消费 != 更早记录已完成写入，
+        # 与等待写锁的在途记录存在竞态），故此路径保留逐条 task_done 计数。
         q = self._queue
         while True:
             record = q.get()
@@ -169,7 +199,7 @@ class _WorkerPool:
     def stop(self, timeout: Optional[float] = None) -> None:
         """投递 N 个哨兵并等待全部 worker 退出（退出前排空剩余记录）。"""
         for _ in self._threads:
-            self._queue.put_nowait(self._SHUTDOWN)
+            self._queue.put(self._SHUTDOWN)
         for t in self._threads:
             t.join(timeout)
 
@@ -182,7 +212,7 @@ class _Backend:
         *,
         root_handlers: list[logging.Handler],
         targets: list[logging.Handler],
-        q: Optional["_queue.Queue[Any]"] = None,
+        drain: "Optional[Any]" = None,
         listener: Optional[logging.handlers.QueueListener] = None,
         pool: Optional[_WorkerPool] = None,
         sender: Optional[JsonSender] = None,
@@ -190,7 +220,7 @@ class _Backend:
     ) -> None:
         self.root_handlers = root_handlers  # 挂在 root 上的入口 handler
         self.targets = targets  # 真正落盘 / 输出的目标 handler
-        self.queue = q
+        self.drain = drain  # 屏障令牌排空回调（无队列的同步模式为 None）
         self.listener = listener
         self.pool = pool
         self.sender = sender  # 远端 JSON 发送器（send_json=False 时为 None）
@@ -202,7 +232,8 @@ class _Backend:
 
         语义（与既有 flush 契约兼容的扩展）：
 
-        - 先等写入队列排空（所有记录已被 handler 写出并 flush 到流）；
+        - 先等写入队列排空（屏障令牌：调用前已入队的记录全部被 handler
+          写出），随后显式刷目标 handler 的流到磁盘；
         - 若启用异步远端发送，再尽力排空在途发送（每条受 ``send_timeout``
           约束；``timeout=None`` 时等到全部完成）。
 
@@ -212,10 +243,16 @@ class _Backend:
             （无队列、无派发线程）恒为 ``True``。
         """
         drained = True
-        if self.queue is not None:
-            drained = _join_queue(self.queue, timeout)
+        if not self.closed and self.drain is not None:
+            drained = self.drain(timeout)
         if self.dispatcher is not None:
             drained = self.dispatcher.wait(timeout) and drained
+        # 队列排空后显式刷目标流：缓冲写 handler 不逐条刷盘，落盘保证由本处承接
+        for handler in self.targets:
+            try:
+                handler.flush()
+            except Exception:  # pragma: no cover - flush 失败不应破坏排空语义
+                pass
         return drained
 
     def stop(self, timeout: Optional[float] = None) -> None:
@@ -250,6 +287,97 @@ def _teardown(backend: Optional[_Backend]) -> None:
     backend.stop(timeout=10.0)
 
 
+class _BufferedFileHandler(logging.FileHandler):
+    """不逐条 flush 的文件 handler（吞吐优先）。
+
+    标准库 ``StreamHandler.emit`` 每条记录后 ``stream.flush()``，是同步
+    落盘热路径的主要开销之一。本类只写缓冲、不逐条刷盘，落盘时机收敛为：
+    :func:`flush`（``_Backend`` 会显式刷目标 handler 的流）、轮转
+    ``doRollover``（close 会先刷缓冲）、停机 / atexit（close 刷缓冲）。
+    代价：进程**硬崩溃**可能丢缓冲尾部（正常停机与 flush 语义不丢）。
+    """
+
+    def handle(self, record: logging.LogRecord) -> None:
+        """跳过 handler 锁直达 emit（写者串行由后台池/监听线程结构保证）。"""
+        self.emit(record)
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            msg = self.format(record)
+            self.stream.write(msg + self.terminator)
+        except Exception:
+            self.handleError(record)
+
+
+class _BufferedRotatingFileHandler(logging.handlers.RotatingFileHandler):
+    """同 :class:`_BufferedFileHandler`，按大小轮转版（emit 逻辑对齐标准库，仅去掉逐条 flush）。"""
+
+    def handle(self, record: logging.LogRecord) -> None:
+        """跳过 handler 锁直达 emit（写者串行由后台池结构保证）。"""
+        self.emit(record)
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            if self.shouldRollover(record):
+                self.doRollover()
+            msg = self.format(record)
+            self.stream.write(msg + self.terminator)
+        except Exception:
+            self.handleError(record)
+
+
+class _BufferedTimedRotatingFileHandler(logging.handlers.TimedRotatingFileHandler):
+    """同 :class:`_BufferedFileHandler`，按时间轮转版。"""
+
+    def handle(self, record: logging.LogRecord) -> None:
+        """跳过 handler 锁直达 emit（写者串行由后台池结构保证）。"""
+        self.emit(record)
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            if self.shouldRollover(record):
+                self.doRollover()
+            msg = self.format(record)
+            self.stream.write(msg + self.terminator)
+        except Exception:
+            self.handleError(record)
+
+
+class _FlushBarrier:
+    """flush 屏障令牌：N 个消费者各确认一次后置位事件。
+
+    替代 ``queue.Queue`` 的逐条 ``task_done``/``join``（每次入队都动共享
+    计数锁，生产者与消费者在 CPython 下反复让出 GIL）。屏障锁只在消费侧
+    短暂持有，**生产路径零额外同步开销**。
+    """
+
+    __slots__ = ("_event", "_remaining", "_lock")
+
+    def __init__(self, count: int) -> None:
+        self._event = threading.Event()
+        self._remaining = count
+        self._lock = threading.Lock()
+
+    def done(self) -> None:
+        """消费者确认一次；全部确认后置位事件。"""
+        with self._lock:
+            self._remaining -= 1
+            if self._remaining <= 0:
+                self._event.set()
+
+    def wait(self, timeout: Optional[float]) -> bool:
+        """等待全部确认；超时返回 ``False``。"""
+        return self._event.wait(timeout)
+
+
+def _enqueue_barrier(q: "_queue.SimpleQueue", count: int, timeout: Optional[float]) -> bool:
+    """向队列投 ``count`` 个屏障令牌并等待全部被确认（flush 的实现）。"""
+    barrier = _FlushBarrier(count)
+    for _ in range(count):
+        q.put(barrier)
+    return barrier.wait(timeout)
+
+
 def _make_file_handler(
     path: Path,
     *,
@@ -257,17 +385,28 @@ def _make_file_handler(
     max_bytes: int,
     backup_count: int,
     when: str,
+    buffered: bool,
 ) -> logging.Handler:
-    """按轮转策略构造落盘 handler（统一 ``utf-8`` 编码）。"""
+    """按轮转策略构造落盘 handler（统一 ``utf-8`` 编码）。
+
+    ``buffered=True``（后台写入池模式）用缓冲写 handler：不逐条 flush，
+    落盘由 :func:`flush` / 停机 / 轮转承接，吞吐优先；``buffered=False``
+    （同步直写模式）用标准库 handler，逐条 flush，调用返回即落盘。
+    """
     if rotation == "size":
-        return logging.handlers.RotatingFileHandler(
+        cls = _BufferedRotatingFileHandler if buffered else logging.handlers.RotatingFileHandler
+        return cls(
             path, maxBytes=max_bytes, backupCount=backup_count, encoding="utf-8"
         )
     if rotation == "time":
-        return logging.handlers.TimedRotatingFileHandler(
-            path, when=when, backupCount=backup_count, encoding="utf-8"
+        cls = (
+            _BufferedTimedRotatingFileHandler
+            if buffered
+            else logging.handlers.TimedRotatingFileHandler
         )
-    return logging.FileHandler(path, encoding="utf-8")
+        return cls(path, when=when, backupCount=backup_count, encoding="utf-8")
+    cls = _BufferedFileHandler if buffered else logging.FileHandler
+    return cls(path, encoding="utf-8")
 
 
 def setup_logging(
@@ -382,6 +521,7 @@ def setup_logging(
                 max_bytes=max_bytes,
                 backup_count=backup_count,
                 when=when,
+                buffered=async_writer,
             )
             targets.append(file_handler)
             if console:
@@ -418,30 +558,36 @@ def setup_logging(
             root.setLevel(getattr(logging, level_name))
 
             if async_writer:
-                q: "_queue.Queue[Any]" = _queue.Queue()
-                queue_handler = _PipeQueueHandler(q)
-                root.addHandler(queue_handler)
                 # 发送 handler 排在最后：写入（打印）完成后才发送。
                 consumers = list(targets)
                 if send_handler is not None:
                     consumers.append(send_handler)
                 if pool_size == 1:
+                    # 默认路径：SimpleQueue（C 实现，put 不持 Python 互斥锁，
+                    # 生产者不因队列锁与消费线程 GIL 乒乓）+ 屏障令牌 flush。
+                    q: "_queue.SimpleQueue" = _queue.SimpleQueue()
+                    queue_handler = _PipeQueueHandler(q)
+                    root.addHandler(queue_handler)
                     listener = _JoinableQueueListener(q, *consumers)
                     listener.start()
                     backend = _Backend(
                         root_handlers=[queue_handler],
                         targets=targets,
-                        q=q,
+                        drain=lambda timeout, _q=q: _enqueue_barrier(_q, 1, timeout),
                         listener=listener,
                         sender=sender,
                         dispatcher=dispatcher,
                     )
                 else:
-                    pool = _WorkerPool(consumers, pool_size=pool_size, q=q)
+                    # 多 worker：task_done/join 计数保证 flush 语义无竞态
+                    q2: "_queue.Queue[Any]" = _queue.Queue()
+                    queue_handler = _PipeQueueHandler(q2)
+                    root.addHandler(queue_handler)
+                    pool = _WorkerPool(consumers, pool_size=pool_size, q=q2)
                     backend = _Backend(
                         root_handlers=[queue_handler],
                         targets=targets,
-                        q=q,
+                        drain=lambda timeout, _q=q2: _join_queue(_q, timeout),
                         pool=pool,
                         sender=sender,
                         dispatcher=dispatcher,

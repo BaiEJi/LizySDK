@@ -24,7 +24,7 @@ from typing import Any
 
 from .formatter import validate_fields
 
-__all__ = ["bind_context", "clear_context", "get_context_fields"]
+__all__ = ["bind_context", "clear_context", "get_context_fields", "peek_context"]
 
 #: 承载上下文字段的 ContextVar；值为不可变约定下的 dict（只整体替换，不原地修改）。
 _FIELDS: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
@@ -72,3 +72,15 @@ def get_context_fields() -> dict[str, Any]:
     """
     current = _FIELDS.get()
     return dict(current) if current else {}
+
+
+def peek_context() -> "dict[str, Any] | None":
+    """只读窥视当前上下文字段（**不拷贝**）。
+
+    仅供日志发出热路径内部使用（省一次字典拷贝）；调用方**不得修改**
+    返回的字典（copy-on-write 约定，见 :data:`_FIELDS`）。
+
+    Returns:
+        当前字段字典；未绑定时返回 ``None``。
+    """
+    return _FIELDS.get()

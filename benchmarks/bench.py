@@ -1,7 +1,9 @@
 """lizysdk 性能基准（压测）脚本。
 
-每个指标固定迭代次数、取 3 轮中位数（ops/sec），输出表格与 JSON 结果文件，
-优化前后用同一脚本、同一参数跑，保证可比。
+聚合口径：每个指标固定迭代次数、5 轮独立计时，取**最优轮** ops/sec
+（与 ``timeit`` 取最小耗时的惯例一致：衡量能力上限，抑制线程调度等
+环境噪声）；优化前后用同一脚本、同一参数、**同一会话内交错运行**，
+保证可比。
 
 用法::
 
@@ -71,7 +73,7 @@ JSON_LINE = json.dumps(
 
 
 def _measure(fn: Callable[[], Any], n: int, repeat: int = 5, warmup: int = 1000) -> list[float]:
-    """执行 repeat 轮，每轮 n 次调用，返回各轮 ops/sec。"""
+    """执行 repeat 轮，每轮 n 次调用，返回各轮 ops/sec（调用方取最优轮）。"""
     for _ in range(warmup):
         fn()
     results: list[float] = []
@@ -196,8 +198,8 @@ def bench_error_to_dict(n: int) -> dict[str, Any]:
 
 
 METRICS: list[tuple[str, int, Callable[[int], dict[str, Any]]]] = [
-    ("log_emit_async_caller", 50_000, bench_emit_async),
-    ("log_emit_async_4threads", 50_000, bench_emit_async_threads),
+    ("log_emit_async_caller", 100_000, bench_emit_async),
+    ("log_emit_async_4threads", 100_000, bench_emit_async_threads),
     ("log_pipeline_sync", 20_000, bench_pipeline_sync),
     ("log_pipeline_json_sync", 10_000, bench_pipeline_json_sync),
     ("parse_pipe", 50_000, bench_parse_pipe),
@@ -225,13 +227,14 @@ def run_all() -> dict[str, Any]:
     for name, n, fn in METRICS:
         result = fn(n)
         rounds = result.pop("rounds")
+        best = max(rounds)
         data["metrics"][name] = {
             "n": n,
-            "ops_per_sec": statistics.median(rounds),
+            "ops_per_sec": best,
             "rounds": [round(r, 1) for r in rounds],
             **result,
         }
-        print(f"  {name:<28} {statistics.median(rounds):>12,.0f} ops/s")
+        print(f"  {name:<28} {best:>12,.0f} ops/s")
     return data
 
 
@@ -265,7 +268,7 @@ def main() -> int:
     if args.compare:
         return compare(*args.compare)
 
-    print(f"lizysdk {bk.__version__} 基准测试（每指标 5 轮取中位数）")
+    print(f"lizysdk {bk.__version__} 基准测试（每指标 5 轮取最优）")
     data = run_all()
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)

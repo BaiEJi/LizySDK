@@ -210,7 +210,7 @@ class AppError(Exception):
             "code": self._code,
             "message": self._message,
             "http_status": self._http_status,
-            "details": copy.deepcopy(self._details),
+            "details": (copy.deepcopy(self._details) if self._details else {}),
             "timestamp": self._timestamp,
         }
         if include_cause:

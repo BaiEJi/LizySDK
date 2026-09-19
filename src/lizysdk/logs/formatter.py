@@ -97,6 +97,32 @@ FIELDS_ATTR = "bk_fields"
 _KEY_RE = re.compile(KEY_PATTERN)
 _UNESCAPE_MAP = {"n": "\n", "r": "\r", "|": "|"}
 
+#: 秒级时间戳的单槽缓存：``(整数秒, 已格式化文本)``。
+#: 时间格式为秒级精度，同一秒内的所有日志行时间戳文本完全相同；
+#: 单槽在 GIL 下原子替换，读侧偶发未命中只会多算一次，无正确性问题。
+_TS_CACHE: list = [None]
+
+#: 已验证合法的业务 key 缓存（热路径免正则）。key 来自代码字面量，实际有界；
+#: 设上限防御病态场景（如动态拼接 key），超限后退回逐次正则。
+_VALIDATED_KEYS: set = set()
+_VALIDATED_KEYS_MAX = 4096
+
+#: pathname -> basename 缓存（源文件数量天然有界）。
+_BASENAME_CACHE: dict = {}
+_BASENAME_CACHE_MAX = 8192
+
+
+def _cached_basename(path: str) -> str:
+    """带缓存的 ``os.path.basename``（热路径每条日志调用一次）。"""
+    cache = _BASENAME_CACHE
+    try:
+        return cache[path]
+    except KeyError:
+        base = os.path.basename(path)
+        if len(cache) < _BASENAME_CACHE_MAX:
+            cache[path] = base
+        return base
+
 
 def validate_sys_name(sys_name: Any) -> str:
     """校验系统标识：必须是**非空 str**。
@@ -139,11 +165,14 @@ def escape_value(value: Any) -> str:
         '123'
     """
     text = _to_text(value)
-    return (
-        text.replace("\n", "\\n")
-        .replace("\r", "\\r")
-        .replace("|", "\\|")
-    )
+    # 快速路径：绝大多数取值不含任何需转义字符，三次 replace 全程扫描可省
+    if "|" in text or "\n" in text or "\r" in text:
+        return (
+            text.replace("\n", "\\n")
+            .replace("\r", "\\r")
+            .replace("|", "\\|")
+        )
+    return text
 
 
 def unescape(text: str) -> str:
@@ -151,6 +180,8 @@ def unescape(text: str) -> str:
 
     非转义序列的反斜线原样保留。
     """
+    if "\\" not in text:  # 快速路径：无反斜线则不可能存在转义序列
+        return text
     out: list[str] = []
     i, n = 0, len(text)
     while i < n:
@@ -170,7 +201,10 @@ def validate_fields(fields: dict[str, Any]) -> None:
     Raises:
         ValueError: key 非法或使用了保留字（``message`` / ``sys_name``）。
     """
+    validated = _VALIDATED_KEYS
     for key in fields:
+        if key in validated:  # 热路径：重复 key 免正则（一跳命中）
+            continue
         if not isinstance(key, str) or not _KEY_RE.match(key):
             raise ValueError(
                 f"非法日志字段名 {key!r}：须匹配正则 {KEY_PATTERN}"
@@ -179,6 +213,8 @@ def validate_fields(fields: dict[str, Any]) -> None:
             raise ValueError(
                 f"{key} 为保留字段（固定输出字段），不允许作为业务 kv 传入"
             )
+        if len(validated) < _VALIDATED_KEYS_MAX:
+            validated.add(key)
 
 
 def _split_escaped(line: str) -> list[str]:
@@ -265,7 +301,9 @@ def parse_line(line: str) -> dict[str, Any]:
         return obj
 
     # ---- pipe 分支 ------------------------------------------------------------------
-    parts = _split_escaped(raw)
+    # 快速路径：行内无反斜线则不可能存在转义序列，C 级 str.split 与
+    # 转义感知切分语义完全一致；含转义的行（少数）走完整扫描。
+    parts = raw.split(SEP) if "\\" not in raw else _split_escaped(raw)
     if len(parts) < 5:
         raise ValueError(
             f"非法日志行（至少需要 级别/时间/位置/sys_name/message 五段）: {line!r}"
@@ -326,6 +364,24 @@ class _LineFormatterBase(logging.Formatter):
 
     #: 显式声明使用本地时间（这也是标准库默认值）。
     converter = time.localtime  # type: ignore[assignment]
+
+    def formatTime(  # noqa: N802 - 标准库签名
+        self, record: logging.LogRecord, datefmt: "str | None" = None
+    ) -> str:
+        """格式化时间戳（默认秒级格式走单槽缓存，热路径免 strftime）。
+
+        时间格式为秒级精度，同一秒内文本恒定，按 ``int(record.created)``
+        做单槽缓存；非默认 ``datefmt`` 仍走标准库实现。
+        """
+        if datefmt != TIMESTAMP_FORMAT:
+            return super().formatTime(record, datefmt)
+        sec = int(record.created)
+        cached = _TS_CACHE[0]
+        if cached is not None and cached[0] == sec:
+            return cached[1]
+        text = time.strftime(TIMESTAMP_FORMAT, time.localtime(sec))
+        _TS_CACHE[0] = (sec, text)
+        return text
 
     def __init__(
         self,
@@ -395,14 +451,16 @@ class PipeLogFormatter(_LineFormatterBase):
             ValueError: ``sys_name`` 不是非空 ``str``。
         """
         super().__init__(datefmt=datefmt, sys_name=sys_name)
+        # sys_name 初始化后视为只读：预计算恒定不变的 sys_name=xxx 段
+        self._sys_segment = f"{SYS_NAME_KEY}={escape_value(self.sys_name)}"
 
     def format(self, record: logging.LogRecord) -> str:
         """把 LogRecord 拼装为一行 pipe-logfmt 文本（保证单行）。"""
         parts: list[str] = [
             record.levelname,
             self.formatTime(record, self.datefmt),
-            f"{os.path.basename(record.pathname)}:{record.lineno}",
-            f"{SYS_NAME_KEY}={escape_value(self.sys_name)}",
+            f"{_cached_basename(record.pathname)}:{record.lineno}",
+            self._sys_segment,
         ]
         for key, value in self._ordered_fields(record):
             parts.append(f"{key}={escape_value(value)}")
@@ -446,10 +504,11 @@ class JsonLogFormatter(_LineFormatterBase):
         payload: dict[str, Any] = {
             "level": record.levelname,
             "timestamp": self.formatTime(record, self.datefmt),
-            "file": os.path.basename(record.pathname),
+            "file": _cached_basename(record.pathname),
             "line": record.lineno,
             SYS_NAME_KEY: self.sys_name,
         }
         payload.update(self._ordered_fields(record))
         payload["message"] = self._compose_message(record)
-        return json.dumps(payload, ensure_ascii=False)
+        # 紧凑分隔符：无空格 JSONL（json.loads 无差别，行更小、序列化更快）
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))

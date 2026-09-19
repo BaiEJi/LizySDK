@@ -1,0 +1,112 @@
+{
+  "meta": {
+    "lizysdk_version": "0.3.0",
+    "python": "3.10.19 | packaged by Anaconda, Inc. | (main, Oct 21 2025, 16:41:31) [MSC v.1929 64 bit (AMD64)]",
+    "platform": "Windows-10-10.0.19041-SP0",
+    "machine": "AMD64",
+    "processor": "Intel64 Family 6 Model 167 Stepping 1, GenuineIntel",
+    "timestamp": "2026-09-19T10:47:28"
+  },
+  "metrics": {
+    "log_emit_async_caller": {
+      "n": 50000,
+      "ops_per_sec": 39534.64246808083,
+      "rounds": [
+        39653.1,
+        39263.0,
+        39534.6
+      ]
+    },
+    "log_emit_async_4threads": {
+      "n": 50000,
+      "ops_per_sec": 10417.625739337253,
+      "rounds": [
+        10710.0,
+        9260.1,
+        10417.6
+      ]
+    },
+    "log_pipeline_sync": {
+      "n": 20000,
+      "ops_per_sec": 18314.379324256366,
+      "rounds": [
+        15161.3,
+        18446.2,
+        18314.4
+      ]
+    },
+    "log_pipeline_json_sync": {
+      "n": 10000,
+      "ops_per_sec": 16340.3338589853,
+      "rounds": [
+        16340.3,
+        15545.8,
+        16556.4
+      ]
+    },
+    "parse_pipe": {
+      "n": 50000,
+      "ops_per_sec": 21761.96157146089,
+      "rounds": [
+        24265.3,
+        21762.0,
+        20392.5
+      ]
+    },
+    "parse_json": {
+      "n": 20000,
+      "ops_per_sec": 146705.54364711535,
+      "rounds": [
+        157376.0,
+        146705.5,
+        138215.9
+      ]
+    },
+    "id_new_trace_id": {
+      "n": 100000,
+      "ops_per_sec": 661982.040360621,
+      "rounds": [
+        661982.0,
+        615635.8,
+        679144.8
+      ]
+    },
+    "id_new_uid": {
+      "n": 100000,
+      "ops_per_sec": 709402.4914733899,
+      "rounds": [
+        672847.0,
+        709402.5,
+        723153.6
+      ]
+    },
+    "id_new_id_snowflake": {
+      "n": 100000,
+      "ops_per_sec": 625867.6090766786,
+      "rounds": [
+        671929.7,
+        625867.6,
+        587513.3
+      ]
+    },
+    "id_new_sortable_id": {
+      "n": 100000,
+      "ops_per_sec": 116937.60524952138,
+      "rounds": [
+        116937.6,
+        100280.4,
+        127444.5
+      ]
+    },
+    "error_construct_to_dict": {
+      "n": 50000,
+      "ops_per_sec": 91569.22175206606,
+      "rounds": [
+        87957.0,
+        91569.2,
+        102250.0
+      ],
+      "_unused": "RESOURCE_NOT_FOUND"
+    }
+  }
+}

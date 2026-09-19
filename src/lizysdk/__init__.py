@@ -74,7 +74,7 @@ from .logs import (
     setup_logging,
 )
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 __all__ = [
     # ids —— 唯一 ID / trace_id

@@ -72,11 +72,14 @@ LEVEL||TIMESTAMP||FILE:LINE||sys_name=xxx||k1=v1||k2=v2||message=<文本>
 - **可测试接缝**：时间通过模块级 `_current_ms()`（snowflake）与 `_now_ms()`（ulid）获取，测试用 monkeypatch + 脚本化时钟做确定性验证——改实现时必须保留该接缝。
 - `ulid.py`：26 字符 Crockford base32 小写（字母表 ASCII 升序 ⇒ 定长字典序==数值序）；前 10 字符 48bit 毫秒时间戳 + 后 16 字符 80bit 随机；**同毫秒内随机段 +1 递增、时钟回拨沿用上一毫秒继续递增**，全程持锁保证「生成顺序==字典序（单线程严格递增）+ 全局唯一」。
 - `worker.py`：env（默认 `LIZYSDK_WORKER_ID`）显式指定优先且**完全不碰文件**；否则 `{lock_dir}/worker_{id}.json` 用 `os.open(O_CREAT|O_EXCL)` 原子占位、被占顺延、0..1023 全满抛 ValueError；陈旧回收**只按 mtime 年龄**（严禁在 Windows 用 `os.kill(pid,0)` 探活——sig=0 会触发 TerminateProcess）；atexit 释放、同进程重复调用幂等。
+- `trace.py`：随机 hex 来自**线程本地批量熵缓冲**（`_ENTROPY_LOCAL`，补块一次 urandom+整体转 hex，日常一次字符串切片；勿改回进程级共享+锁——Windows 锁开销会吃掉收益）；校验慢路径抽离 `_raise_bad_length`，热路径 `type() is int` 精确匹配（天然排除 bool）。
+- `ulid.py`：编码热路径 = 时间戳段按毫秒单槽缓存（`_TS_PART_CACHE`）+ 80bit 随机段 2 字符查表（`_PAIR_TABLE`，导入期用权威实现 `_encode_impl` 构建——注意表的构建必须在函数定义之后）。
 
 ### logs（`src/lizysdk/logs/`）
 
 - `PipeLogger._emit` 统一路径：校验 → `sys._getframe(2)` 取真实调用方帧（**不要**换回 `findCaller`/stacklevel，3.10/3.11 语义有差异）→ 调用方线程内合并 `{**context, **fields}` 烘焙进 `record.bk_fields`（保证经后台线程格式化不丢）。
-- 已规避的标准库坑（勿回退）：① `QueueHandler.prepare` 会剥离 `exc_info`，需子类透传；② 3.9/早 3.10 的 `QueueListener._monitor` 不调 `task_done`，`flush` 依赖自持 monitor 的 `queue.join()`；③ `pool_size=1` 用 `QueueListener`，`>1` 用自实现 worker 池 + 文件写锁。
+- 已规避的标准库坑（勿回退）：① `QueueHandler.prepare` 会剥离 `exc_info`，需子类透传（现进一步重载 `emit/handle/enqueue` 直达 `queue.put`）；② 写队列：**pool_size=1（默认）用 `queue.SimpleQueue`（C 实现）+ 自持 monitor + 屏障令牌 `_FlushBarrier` flush**——put 不持 Python 锁、免逐条 task_done 共享计数锁；**pool_size>1 必须用 `queue.Queue` + task_done/join**（多消费者下「令牌被消费 ≠ 更早记录已写完」，屏障有竞态，曾有测试抓到 3 条丢失）；③ 文件 handler 分层：异步模式用缓冲写 `_Buffered*FileHandler`（不逐条 flush，落盘由 `_Backend.flush` 显式刷流/轮转/停机承接），**同步模式必须用标准库 handler 逐条刷盘**（「调用返回即落盘」是测试固化的契约）。
+- 热路径缓存契约（新增，改动勿破坏）：秒级时间戳单槽缓存（仅默认 `TIMESTAMP_FORMAT` 生效，自定义 datefmt 走标准库）、`_VALIDATED_KEYS` 合法 key 缓存（上限 4096）、`_BASENAME_CACHE`、`sys_name` 段预计算（**格式化器初始化后 sys_name 视为只读**）、上下文零拷贝 `peek_context()`（返回字典不得修改）、JSONL 紧凑分隔符输出。
 - `setup_logging` 幂等：先拆旧 handler、停后台线程再重建；atexit 钩子保证退出不丢日志。
 - 已知契约自洽决策：`PipeLogger` 消息形参名为 `msg`（沿用标准库），使 `log.info("m", message="x")` 落入 `**fields` 由校验器抛 `ValueError`（若形参叫 `message` 会先抛 `TypeError`，违背契约）。
 - sender.py / handlers.py 分工：`JsonSender`（urllib.request + 锁保护计数）、`SendDispatcher`（FIFO 守护线程）；`_SendHandler` 挂在 handler 链末尾。
@@ -97,6 +100,8 @@ python -m pytest -v                                    # 全量测试（当前 3
 python -m pytest tests/test_logs.py -v                 # 单模块
 python -m pytest --doctest-modules src/lizysdk/errors  # docstring 示例验证
 python examples/demo.py                                # 端到端冒烟
+python benchmarks/bench.py --out benchmarks/results/x.json  # 性能压测
+python benchmarks/report.py                            # 压测聚合对比（报告见 benchmarks/REPORT.md）
 python -m pip install -e .                             # 开发安装（可省，conftest 已注入 src）
 ```
 
@@ -113,6 +118,7 @@ python -m pip install -e .                             # 开发安装（可省�
 
 ## 变更记录
 
+- **0.4.0** —— 性能专项：热路径缓存/快速路径、SimpleQueue+屏障令牌、缓冲写 handler（分层语义）、熵缓冲、ULID 查表；JSONL 紧凑输出；新增 benchmarks（几何平均 +74.4%，方法与数据见 benchmarks/REPORT.md）
 - **0.3.0** —— errors：业务码注册表、include_cause、ext FastAPI/Flask 适配器；ids：ULID 可排序 ID、worker_id 协商
 - **0.2.0** —— trace_id 默认 16 位可选位数；新增 `new_uid`；日志 sys_name/JSONL/send_json 发送/send_stats；包更名 lizysdk
 - **0.1.0** —— 首版（原包名 basekit）

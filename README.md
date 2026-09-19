@@ -93,10 +93,10 @@ log.error("db failed", exc_info=True)    # 异常栈自动转义为单行
 **两种输出格式**（由 `json_format` 开关）：
 
 ```
-# pipe（默认）                                # JSON（json_format=True，JSONL）
-INFO||2026-09-19T10:30:00||app.py:10||       {"level": "INFO", "timestamp": "2026-09-19T10:30:00",
-sys_name=order-svc||user_id=123||             "file": "app.py", "line": 10, "sys_name": "order-svc",
-message=user logged in                        "user_id": "123", "message": "user logged in"}
+# pipe（默认）                                # JSON（json_format=True，JSONL 紧凑输出）
+INFO||2026-09-19T10:30:00||app.py:10||       {"level":"INFO","timestamp":"2026-09-19T10:30:00",
+sys_name=order-svc||user_id=123||             "file":"app.py","line":10,"sys_name":"order-svc",
+message=user logged in                        "user_id":"123","message":"user logged in"}
 ```
 
 **`setup_logging` 参数全表**：
@@ -269,6 +269,15 @@ def get_order(order_no: str):
   直接走 `send_json` 集中收集。
 - **发送端不可用会影响业务吗？** 不会。失败仅计数（`send_stats()`），本地写盘不受影响。
 
+## 性能
+
+v0.4.0 对热路径做了专项优化（秒级时间戳/键名/编码缓存、无转义快速路径、
+SimpleQueue 写队列 + 屏障令牌 flush、缓冲写 handler、批量熵缓冲、ULID 查表
+编码等），同机交错压测 **几何平均提升 +74.4%**：4 线程并发日志 **+352%**、
+pipe 解析 **+577%**、ULID 生成 **+210%**、异步打点 +45%。完整数据与方法见
+[benchmarks/REPORT.md](benchmarks/REPORT.md)；复现：`python benchmarks/bench.py`
+与 `python benchmarks/report.py`。
+
 ## 项目结构
 
 ```
@@ -281,6 +290,7 @@ lizysdk/
 │   │               # standard.py 子类 · utils.py wrap/ensure
 │   └── ext/        # fastapi_adapter.py · flask_adapter.py（可选依赖组 [web]）
 ├── tests/          # test_ids / test_logs / test_errors / test_ext_web / test_integration
+├── benchmarks/     # bench.py 压测脚本 · report.py 聚合对比 · REPORT.md 报告 · results/
 ├── examples/       # demo.py 基础三件套 · web_demo.py FastAPI 全家桶
 └── docs/           # log-server-design.md 日志服务端设计
 ```
@@ -298,6 +308,11 @@ python examples/web_demo.py                           # 全家桶端到端冒烟
 
 ## 变更记录
 
+- **0.4.0** —— 性能专项优化（同机交错压测几何平均 **+74.4%**，354 测试零回归）：
+  秒级时间戳/键名校验/basename 缓存、转义与解析快速路径、写队列 SimpleQueue +
+  屏障令牌 flush、异步模式缓冲写 handler（flush 语义不变）、随机 ID 线程本地
+  批量熵缓冲、ULID 查表编码；JSONL 输出改为紧凑分隔符（`json.loads` 无差别）；
+  新增 benchmarks/ 压测与报告
 - **0.3.0** —— errors：业务错误码注册表 `register_code`/`unregister_code`/`registered_codes`、
   `to_dict(include_cause=...)`、FastAPI/Flask 适配器（`lizysdk.ext`，可选组 `[web]`）；
   ids：`new_sortable_id`（ULID 可排序 ID）、`resolve_worker_id`（env + 本机锁文件协商）

@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import secrets
+import threading
 
 __all__ = ["new_trace_id", "new_uid"]
 
@@ -27,13 +28,35 @@ _MIN_LENGTH: int = 8
 #: 合法位数上限：64 位 hex = 256 bit 熵，远超任何去中心化场景所需
 _MAX_LENGTH: int = 64
 
+#: 熵缓冲：每线程独立一批随机 hex 字符（补块时一次 ``urandom`` 系统调用
+#: + 整体转 hex），日常生成只是一次字符串切片——**线程本地即免锁**，
+#: 跨线程互不重叠故天然全局唯一。随机源仍为 :func:`secrets.token_bytes`
+#: （操作系统级密码学安全随机），缓冲只是同一批随机字符短暂驻留内存
+#: （每线程约 1KB，随线程销毁释放）。
+_ENTROPY_CHUNK: int = 512
+_ENTROPY_LOCAL = threading.local()
+
+
+def _raise_bad_length(length: int) -> None:
+    """抛出位数非法的 ValueError（慢路径，消息与历史版本逐字一致）。"""
+    # bool 是 int 的子类，必须先于 int 判断显式排除
+    if isinstance(length, bool) or not isinstance(length, int):
+        raise ValueError(
+            f"length 必须为 int（bool 除外），合法范围为 "
+            f"[{_MIN_LENGTH}, {_MAX_LENGTH}]；当前类型为 {type(length).__name__}"
+        )
+    raise ValueError(
+        f"length 必须在 [{_MIN_LENGTH}, {_MAX_LENGTH}] 内，当前为 {length}"
+    )
+
 
 def _random_hex(length: int) -> str:
     """生成精确 ``length`` 位的小写十六进制随机字符串（模块内私有辅助）。
 
-    :func:`secrets.token_hex` 按字节产码，只能直接得到偶数长度
-    （每字节恰编码为 2 个 hex 字符），因此先按 ``ceil(length / 2)``
-    字节生成、再截断到精确长度，奇数位数同样支持。
+    热路径零函数层级：``type() is int`` 精确匹配（天然排除 bool 子类）+ 范围
+    检查；非法值走 :func:`_raise_bad_length` 慢路径，不占热路径开销。
+    随机字符来自线程本地的批量 hex 熵缓冲（见 :data:`_ENTROPY_LOCAL`
+    处的说明），单次生成只是一次字符串切片。
 
     Args:
         length: 目标十六进制字符位数，必须为 int（bool 除外）且
@@ -49,22 +72,20 @@ def _random_hex(length: int) -> str:
     Example:
         >>> len(_random_hex(16))
         16
-        >>> len(_random_hex(9))  # 奇数位：生成 5 字节再截断
+        >>> len(_random_hex(9))  # 奇数位：直接切 9 个字符
         9
     """
-    # bool 是 int 的子类，必须先于 int 判断显式排除
-    if isinstance(length, bool) or not isinstance(length, int):
-        raise ValueError(
-            f"length 必须为 int（bool 除外），合法范围为 "
-            f"[{_MIN_LENGTH}, {_MAX_LENGTH}]；当前类型为 {type(length).__name__}"
-        )
-    if not _MIN_LENGTH <= length <= _MAX_LENGTH:
-        raise ValueError(
-            f"length 必须在 [{_MIN_LENGTH}, {_MAX_LENGTH}] 内，当前为 {length}"
-        )
-    # ceil(length/2) 字节编码为偶数位 hex，再截断为精确位数
-    nbytes = (length + 1) // 2
-    return secrets.token_hex(nbytes)[:length]
+    # type() 精确匹配排除 bool 子类；非法值统一在慢路径抛出
+    if type(length) is not int or not _MIN_LENGTH <= length <= _MAX_LENGTH:
+        _raise_bad_length(length)
+    state = getattr(_ENTROPY_LOCAL, "state", None)
+    if state is None or len(state[0]) - state[1] < length:
+        buf = secrets.token_bytes(max(_ENTROPY_CHUNK, (length + 1) // 2)).hex()
+        pos = 0
+    else:
+        buf, pos = state
+    _ENTROPY_LOCAL.state = (buf, pos + length)
+    return buf[pos : pos + length]
 
 
 def new_trace_id(length: int = 16) -> str:

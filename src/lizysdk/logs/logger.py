@@ -23,7 +23,7 @@ import logging
 import sys
 from typing import Any
 
-from .context import get_context_fields
+from .context import peek_context
 from .formatter import FIELDS_ATTR, validate_fields
 
 __all__ = ["PipeLogger", "get_logger"]
@@ -63,7 +63,8 @@ class PipeLogger(logging.Logger):
         帧深度约定：调用链恒为 ``用户代码 -> debug/info/... -> _emit``，
         故 ``sys._getframe(2)`` 即真实调用方。
         """
-        validate_fields(fields)
+        if fields:
+            validate_fields(fields)
         if msg is None:
             raise ValueError("缺少日志消息文本（第一个位置参数）")
         if not self.isEnabledFor(level):
@@ -88,7 +89,11 @@ class PipeLogger(logging.Logger):
             if exc == (None, None, None):
                 exc = None  # exc_info=True 但不在 except 块中
 
-        merged = {**get_context_fields(), **fields}
+        # 上下文与调用侧字段合并：无上下文时直接把调用侧 kwargs 字典交给
+        # record（该字典由参数绑定新建、调用方不持有引用，且后续只读），
+        # 省去热路径上的两次字典分配/拷贝。
+        ctx = peek_context()
+        merged = {**ctx, **fields} if ctx else fields
         record = self.makeRecord(
             self.name,
             level,
