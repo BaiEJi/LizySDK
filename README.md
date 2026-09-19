@@ -155,6 +155,11 @@ python -m pytest --doctest-modules src/lizysdk/errors # 文档示例验证
 python examples/demo.py                               # 端到端冒烟
 ```
 
+## 日志服务端
+
+`send_json` 配套的自研接收端（SQLite / PostgreSQL 双存储、检索 API、保留策略）设计文档见
+[docs/log-server-design.md](docs/log-server-design.md)。
+
 ## 变更记录
 
 - **0.2.0** —— trace_id 默认 16 位、位数可选（8~64）；新增 `new_uid`；日志新增
