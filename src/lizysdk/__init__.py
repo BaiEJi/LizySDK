@@ -13,6 +13,8 @@
 - :mod:`lizysdk.shell` —— shell 执行包装（安全 argv、超时、结构化命令日志、富错误）
 - :mod:`lizysdk.dist` —— 分布式原语（Redis 滑动窗口计数器 / 分布式锁，
   可选依赖组 ``pip install lizysdk[redis]``，模块级懒加载）
+- :mod:`lizysdk.notify` —— 通知中心（钉钉/飞书/企业微信/邮件/自定义 webhook，
+  级别路由、静默期、频控、异步投递与重试）
 
 一行日志的格式契约（``message`` 恒为最后一段）::
 
@@ -84,6 +86,16 @@ from .logs import (
     parse_line,
     send_stats,
     setup_logging,
+)
+from .notify import (
+    ChannelError,
+    DingTalkChannel,
+    EmailChannel,
+    FeishuChannel,
+    NotifyCenter,
+    NotifyError,
+    WebhookChannel,
+    WeComChannel,
 )
 from .pools import (
     AsyncPool,
@@ -161,6 +173,15 @@ __all__ = [
     "LockError",
     "LockTimeoutError",
     "LockNotOwnedError",
+    # notify —— 通知中心
+    "NotifyCenter",
+    "DingTalkChannel",
+    "FeishuChannel",
+    "WeComChannel",
+    "EmailChannel",
+    "WebhookChannel",
+    "NotifyError",
+    "ChannelError",
 ]
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"

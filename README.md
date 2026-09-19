@@ -1,11 +1,11 @@
 # lizysdk
 
-通用 Python 基础工具包：**唯一 ID / trace_id 生成 · 结构化日志（pipe/JSON 双格式 + 远程发送）· 标准化错误体系（业务码注册表 + Web 框架适配）· 统一并发池（线程/协程/进程）· shell 执行包装 · 分布式原语（Redis 滑动窗口/分布式锁）**。
+通用 Python 基础工具包：**唯一 ID / trace_id 生成 · 结构化日志（pipe/JSON 双格式 + 远程发送）· 标准化错误体系（业务码注册表 + Web 框架适配）· 统一并发池（线程/协程/进程）· shell 执行包装 · 分布式原语（Redis 滑动窗口/分布式锁）· 通知中心（钉钉/飞书/企微/邮件/webhook）**。
 
 - 核心纯标准库，**零第三方依赖**，`import lizysdk` 即用；Web 适配 `lizysdk[web]`、Redis 组件 `lizysdk[redis]` 走可选依赖组
 - Python **3.9~3.13 实测全绿**（见支持矩阵），全量类型注解（随包发布 `py.typed`）
 - 线程安全（ID 生成器与日志写入均经并发验证）
-- **527 个测试**全绿
+- **675 个测试**全绿
 - 仓库：<https://github.com/BaiEJi/LizySDK>
 
 ## 安装
@@ -284,6 +284,34 @@ lock.extend(10)                                         # 续期（compare-token
 fencing token。设计对比（sh/plumbum、limits/redis-cell、Redlock/Kleppmann 争议）见
 [docs/shell-dist-design.md](docs/shell-dist-design.md)。
 
+### 8. 通知中心（`lizysdk.notify`，零依赖）
+
+钉钉 / 飞书 / 企业微信 / 邮件 / 自定义 webhook 统一 `notify()`，级别路由、静默期、
+同标题频控、异步投递与重试——Apprise 的统一扇出 + Grafana 的路由/静默期模型：
+
+```python
+import lizysdk as bk
+
+center = bk.NotifyCenter()
+center.add_channel("ops", bk.DingTalkChannel(webhook="https://oapi.dingtalk.com/robot/send?access_token=xxx", secret="SEC..."))
+center.add_channel("mail", bk.EmailChannel(host="smtp.x.com", user="bot@x.com", password="***", to=["a@x.com"]))
+
+center.route("error", channels=["ops", "mail"])                          # 级别路由
+center.set_quiet_hours("22:00", "08:00", except_levels=("critical",))   # 静默期(跨午夜)
+center.set_cooldown(600, except_levels=("critical",))                   # 同标题 10 分钟一次
+
+center.notify("订单异常", "SO-001 扣减失败", level="error")   # 异步入队即返回
+center.notify_to("ops", "标题", "内容")                        # 直发指定渠道
+center.stats()    # sent/failed/retried/quiet_suppressed/cooldown_suppressed/last_error/各渠道计数
+center.flush(timeout=10)
+```
+
+- 五渠道消息格式与签名逐字节对齐官方 API（钉钉加签 / 飞书空串签名——两者算法不同，
+  有防串用回归钩子）；企微无需签名；邮件走 smtplib
+- 单渠道失败隔离不影响其他渠道；重试指数退避；atexit 排空不丢
+- 设计对比（Apprise/notifiers/Grafana/ntfy）与渠道契约见
+  [docs/notify-design.md](docs/notify-design.md)
+
 ---
 
 ## 完整示例
@@ -359,7 +387,8 @@ lizysdk/
 │   ├── ext/        # fastapi_adapter.py · flask_adapter.py（可选依赖组 [web]）
 │   ├── pools/      # 统一并发池：base/thread_pool/async_pool/process_pool/exceptions
 │   ├── shell/      # shell 执行包装：run/ShellResult/ShellError（零依赖）
-│   └── dist/       # 分布式原语：window.py 滑动窗口 · lock.py 分布式锁（可选组 [redis]，懒加载）
+│   ├── dist/       # 分布式原语：window.py 滑动窗口 · lock.py 分布式锁（可选组 [redis]，懒加载）
+│   └── notify/     # 通知中心：五渠道 channels.py · NotifyCenter center.py（零依赖）
 ├── tests/          # test_ids / test_logs / test_errors / test_ext_web / test_integration
 ├── benchmarks/     # bench.py 压测脚本 · report.py 聚合对比 · REPORT.md 报告 · results/
 ├── examples/       # demo.py 基础三件套 · web_demo.py FastAPI 全家桶
@@ -395,6 +424,10 @@ python examples/web_demo.py                           # 全家桶端到端冒烟
 
 ## 变更记录
 
+- **0.7.0** —— 新增 `lizysdk.notify` 通知中心：钉钉/飞书/企微/邮件/自定义 webhook
+  五渠道（消息格式与签名逐字节对齐官方 API）、级别路由、静默期（跨午夜）、同标题
+  频控、异步投递/重试/失败隔离/统计；参考 Apprise/Grafana 告警模型
+  （docs/notify-design.md）；147 个离线测试
 - **0.6.0** —— 新增 `lizysdk.shell`（run/ShellResult/ShellError，恒 shell=False、超时、
   结构化命令日志）与 `lizysdk.dist`（Redis 滑动窗口计数器 ZSET+Lua 原子、分布式锁
   SET NX PX + token + Lua 释放/续期；可选组 `[redis]` 懒加载）；设计对比

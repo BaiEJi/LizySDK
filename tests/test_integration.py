@@ -151,6 +151,28 @@ def test_shell_and_dist_wired() -> None:
     assert bk.DLock(client, "it-lock", timeout=2).acquire(blocking=False) is True
 
 
+def test_notify_center_wired() -> None:
+    """0.7.0 通知中心贯通：路由 + 异步送达 + 统计（transport 注入，离线）。"""
+    sent: list[tuple[str, dict]] = []
+
+    def fake_transport(url, payload, headers, timeout):
+        sent.append((url, payload))
+        return 200, '{"errcode":0}'
+
+    center = bk.NotifyCenter()
+    center.add_channel("ops", bk.WebhookChannel("http://x/hook", transport=fake_transport))
+    center.route("error", channels=["ops"])
+    center.notify("订单异常", "SO-001 扣减失败", level="error")
+    assert center.flush(timeout=5) is True
+
+    assert len(sent) == 1
+    assert sent[0][1]["title"] == "订单异常"
+    assert sent[0][1]["level"] == "error"
+    stats = center.stats()
+    assert stats["sent"] == 1 and stats["channels"]["ops"]["sent"] == 1
+    center.shutdown()
+
+
 def test_error_wrapped_into_log_with_trace(tmp_path) -> None:
     """wrap() 包装底层异常后，异常信息可结构化进入日志，trace_id 全程一致。"""
     log_dir = tmp_path / "logs"
