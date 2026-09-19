@@ -11,8 +11,9 @@
 - :mod:`lizysdk.ext`    —— Web 框架适配器（FastAPI/Flask，需 ``pip install lizysdk[web]``）
 - :mod:`lizysdk.pools`  —— 统一并发池（线程/协程/进程，初始化选类型，钩子 + 统计）
 - :mod:`lizysdk.shell` —— shell 执行包装（安全 argv、超时、结构化命令日志、富错误）
-- :mod:`lizysdk.dist` —— 分布式原语（Redis 滑动窗口计数器 / 分布式锁，
-  可选依赖组 ``pip install lizysdk[redis]``，模块级懒加载）
+- :mod:`lizysdk.dist` —— 分布式原语 / Redis 能力套件（滑动窗口计数器 /
+  分布式锁 / 可重入锁+看门狗 / 领导选举 / 幂等键 / 可靠队列 / 延迟队列 /
+  排行榜，可选依赖组 ``pip install lizysdk[redis]``，模块级懒加载）
 - :mod:`lizysdk.notify` —— 通知中心（钉钉/飞书/企业微信/邮件/自定义 webhook，
   级别路由、静默期、频控、异步投递与重试）
 
@@ -56,9 +57,19 @@ from .errors import (
 )
 from .dist import (
     DLock,
+    DelayQueue,
+    IdempotencyConflictError,
+    IdempotencyDoneError,
+    IdempotencyError,
+    IdempotentKey,
+    Job,
+    LeaderElector,
+    Leaderboard,
     LockError,
     LockNotOwnedError,
     LockTimeoutError,
+    RLock,
+    ReliableQueue,
     SlidingWindowCounter,
 )
 from .shell import ShellError, ShellResult, ShellTimeoutError, run
@@ -167,12 +178,22 @@ __all__ = [
     "ShellResult",
     "ShellError",
     "ShellTimeoutError",
-    # dist —— 分布式原语（可选依赖组 lizysdk[redis]）
+    # dist —— 分布式原语 / Redis 能力套件（可选依赖组 lizysdk[redis]）
     "SlidingWindowCounter",
     "DLock",
+    "RLock",
     "LockError",
     "LockTimeoutError",
     "LockNotOwnedError",
+    "LeaderElector",
+    "IdempotentKey",
+    "IdempotencyError",
+    "IdempotencyConflictError",
+    "IdempotencyDoneError",
+    "ReliableQueue",
+    "DelayQueue",
+    "Job",
+    "Leaderboard",
     # notify —— 通知中心
     "NotifyCenter",
     "DingTalkChannel",
@@ -184,4 +205,4 @@ __all__ = [
     "ChannelError",
 ]
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"

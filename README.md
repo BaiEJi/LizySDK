@@ -263,26 +263,75 @@ run("python", "-m", "pip", "install", "xxx", check=True)   # 非零退出抛 She
 
 命令日志经标准 logging 通道输出，被 `setup_logging` 统一格式捕获（argv/elapsed_ms/returncode）。
 
-### 7. 分布式原语（`lizysdk.dist`，需 `pip install lizysdk[redis]`）
+### 7. Redis 能力套件（`lizysdk.dist`，需 `pip install lizysdk[redis]`）
 
-**滑动窗口计数器**（limits 库同款 ZSET+Lua 原子方案）与**分布式锁**（redis-py Lock 同款
-SET NX PX + token + Lua 释放/续期）：
+v0.6.0 的滑动窗口计数器（limits 库同款 ZSET+Lua）与分布式锁（redis-py Lock 同款
+SET NX PX + token）之上，v0.8.0 扩为八件套——**每个组件的算法都对齐开源实现**
+（出处标注在类 docstring 与设计文档）：
+
+| 组件 | 对齐实现 | 一句话语义 |
+|---|---|---|
+| `SlidingWindowCounter` | limits / redis.io 限流教程 | ZSET+Lua 原子四步，`(now-window, now]` 精确窗口 |
+| `DLock` | redis-py Lock | 不可重入效率锁；token 保护防误删他人锁 |
+| `RLock` | Redisson RedissonLock | hash 重入计数 + 看门狗每 TTL/3 自动续期 |
+| `LeaderElector` | Kubernetes Lease | 独占租约 + 心跳续期 + 失联自动下台 |
+| `IdempotentKey` | Stripe Idempotency Key | processing→done 两态；重复请求拿缓存结果 |
+| `ReliableQueue` | redis.io Reliable queue | LMOVE→processing + LREM ack，at-least-once |
+| `DelayQueue` | Redisson RDelayedQueue | ZSET 到期分 + 原子 Lua 搬运到 ready list |
+| `Leaderboard` | redis.io Leaderboard | ZSET 计分/名次/top/around 窗口，1-based |
 
 ```python
-from lizysdk import SlidingWindowCounter, DLock
+from lizysdk import RLock, LeaderElector, IdempotentKey, ReliableQueue, DelayQueue, Leaderboard
 
-counter = SlidingWindowCounter(client, window=60)       # 60 秒滑动窗口
-counter.incr("user:1:api")                              # -> 窗口内当前计数（原子）
-counter.allow("user:1:api", limit=100)                  # 限流判定薄糖
+# 可重入锁 + 看门狗（长任务不必手动续期，进程活着锁不丢）
+with RLock(client, "job:42"):            # 同线程嵌套 with 层层计数
+    with RLock(client, "job:42"):
+        run_job()                        # lease_time=5 则固定 5s 无看门狗
 
-with DLock(client, "job:42", timeout=10):               # TTL 10s，崩溃自动过期
-    run_job()                                           # 不可重入；token 保护防误删他人锁
-lock.extend(10)                                         # 续期（compare-token）
+# 领导选举（多实例部署只跑一份定时任务的经典场景）
+elector = LeaderElector(client, "cron-leader",
+                        on_become_leader=start_jobs,
+                        on_losing_leadership=stop_jobs, lease=15)
+elector.start()
+elector.is_leader                        # 本实例是否领导
+elector.leader_id()                      # 当前领导的 holder_id（跟随者发现）
+
+# 幂等键（支付/下单防重复提交）
+idem = IdempotentKey(client)
+try:
+    with idem.guard("pay:order:123", processing_ttl=60) as g:
+        result = do_pay()
+        g.complete(result, ttl=86400)    # 落 done + 缓存结果
+except IdempotencyConflictError:
+    ...                                  # 并发重复：409 语义
+except IdempotencyDoneError as e:
+    cached = e.result                    # 已完成：直接拿缓存
+
+# 可靠队列（at-least-once，消费方需幂等）
+rq = ReliableQueue(client, "orders")
+job_id = rq.push("order:123")            # 返回任务 id
+job = rq.pop(timeout=5)                  # LMOVE -> processing；无货 None
+rq.ack(job)                              # 处理成功：LREM
+rq.nack(job)                             # 处理失败：回队重投（tries+1）
+rq.recover()                             # 清扫：崩溃者残留全量搬回
+
+# 延迟队列（30 秒后执行）
+dq = DelayQueue(client, "reminders")
+job_id = dq.push("sms:send:42", delay=30)
+job = dq.pop_ready(timeout=5)            # 先搬到期项再弹；cancel(job_id) 可取消
+
+# 排行榜（1-based 名次；同分按 member 字典序）
+lb = Leaderboard(client, "game:1:score")
+lb.incr_score("alice", 50)
+lb.rank("alice")                         # -> 1
+lb.top(10)                               # -> [(member, score), ...] 降序
+lb.around("alice", span=2)               # 「我的排名」窗口
 ```
 
-诚实边界：锁为**单实例效率锁**（多节点 Redlock 见设计文档 v2）；强互斥正确性需业务侧
-fencing token。设计对比（sh/plumbum、limits/redis-cell、Redlock/Kleppmann 争议）见
-[docs/shell-dist-design.md](docs/shell-dist-design.md)。
+诚实边界：锁/选举为**单实例**语义（多节点 Redlock 见设计文档 v2）；强互斥正确性需
+业务侧 fencing token；可靠队列 at-least-once 可能重复投递。算法出处与对比
+（Redisson/K8s/Stripe/redis.io 官方 pattern）见
+[docs/redis-suite-design.md](docs/redis-suite-design.md)。
 
 ### 8. 通知中心（`lizysdk.notify`，零依赖）
 
@@ -424,6 +473,7 @@ python examples/web_demo.py                           # 全家桶端到端冒烟
 
 ## 变更记录
 
+- **0.8.0** —— `lizysdk.dist` 扩为 Redis 能力套件：`RLock` 可重入锁+看门狗（Redisson）、`LeaderElector` 领导选举（K8s Lease）、`IdempotentKey` 幂等键（Stripe 两态）、`ReliableQueue` 可靠队列（redis.io 官方 pattern）、`DelayQueue` 延迟队列（Redisson RDelayedQueue）、`Leaderboard` 排行榜（redis.io）；150 新测试（fakeredis 全离线）+ 压测报告（benchmarks/REDIS_REPORT.md）
 - **0.7.0** —— 新增 `lizysdk.notify` 通知中心：钉钉/飞书/企微/邮件/自定义 webhook
   五渠道（消息格式与签名逐字节对齐官方 API）、级别路由、静默期（跨午夜）、同标题
   频控、异步投递/重试/失败隔离/统计；参考 Apprise/Grafana 告警模型

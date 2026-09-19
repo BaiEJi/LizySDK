@@ -1,0 +1,53 @@
+{
+  "meta": {
+    "lizysdk_version": "0.8.0",
+    "backend": "fakeredis 2.38.0（进程内，无网络）",
+    "python": "3.10.19 | packaged by Anaconda, Inc. | (main, Oct 21 2025, 16:41:31) [MSC v.1929 64 bit (AMD64)]",
+    "platform": "Windows-10-10.0.19041-SP0",
+    "cpu": "Intel64 Family 6 Model 167 Stepping 1, GenuineIntel",
+    "timestamp": "2026-09-20T01:12:10"
+  },
+  "rlock": {
+    "l1_s": 2.4403648000006797,
+    "l1_ops": 819.5496017642292,
+    "l5_s": 0.7786148000013782,
+    "l5_ops": 2568.6642483503524
+  },
+  "rlock_watchdog": {
+    "cycles": 20,
+    "hold_s": 0.5,
+    "watchdog_on_per_cycle_ms": 11.139625000214437,
+    "watchdog_off_per_cycle_ms": 11.028240000086953,
+    "watchdog_overhead_per_cycle_ms": 0.11138500012748409
+  },
+  "queue": {
+    "serial_s": 0.7301693000044907,
+    "serial_ops": 8217.2723503482,
+    "threads4_s": 1.7748657999982242,
+    "threads4_ops": 6761.07455561542
+  },
+  "delay": {
+    "n": 2000,
+    "batch_s": 1.1820451000021421,
+    "batch_ops": 5075.948455764612
+  },
+  "leaderboard": {
+    "n_members": 2000,
+    "add_s": 0.242152899998473,
+    "add_ops": 8259.244469145782,
+    "reads": 500,
+    "read_s": 0.28514300000097137,
+    "read_ops": 5260.5184065359845
+  },
+  "idempotent": {
+    "n": 2000,
+    "s": 0.3059807000026922,
+    "ops": 13072.719945946938
+  },
+  "control": {
+    "dlock_s": 0.7377109000008204,
+    "dlock_ops": 2711.0891271875958,
+    "swc_incr_s": 0.7954046999948332,
+    "swc_incr_ops": 2514.443276501876
+  }
+}
