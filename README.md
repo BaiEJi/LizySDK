@@ -328,6 +328,22 @@ lizysdk/
 └── docs/           # log-server-design.md 日志服务端设计
 ```
 
+## 支持矩阵
+
+声明并**实测** `requires-python >= 3.9`（classifiers 齐全），全量测试 + editable 安装在各版本真机通过：
+
+| Python | 结果 | 实测版本 |
+|---|---|---|
+| 3.9 | ✅ 434 passed | 3.9.25（最低支持） |
+| 3.10 | ✅ 434 passed | 3.10.19（开发主环境） |
+| 3.11 | ✅ 434 passed | 3.11.16 |
+| 3.12 | ✅ 434 passed | 3.12.14 |
+| 3.13 | ✅ 434 passed | 3.13.15 |
+
+实测环境：Windows 10 · conda 多环境（2026-09-19）。复现：`scripts/ci_matrix.sh`
+（conda 环境驱动，环境创建见脚本注释）；新增版本时同步更新 pyproject classifiers
+与本表。
+
 ## 开发与测试
 
 ```bash

@@ -17,7 +17,7 @@
 ## 硬性规范（改代码前必读，违反即打回）
 
 - **零第三方运行时依赖**：只用标准库。测试仅依赖 pytest（发送测试用 `http.server` 本机起接收端，**禁止真连外网**）。
-- **Python 3.9+ 兼容**：每个模块首行 `from __future__ import annotations`；禁止运行时使用 3.10+ 语法（`match`、裸 `X | Y` 传参等）。
+- **Python 3.9+ 兼容**：每个模块首行 `from __future__ import annotations`；禁止运行时使用 3.10+ 语法（`match`、裸 `X | Y` 传参等）。**多版本矩阵已实测**（3.9~3.13 全绿，见 README 支持矩阵）；新增代码/依赖后必须保持 3.9 可用，动语法或依赖时跑 `scripts/ci_matrix.sh` 验证。
 - **全量类型注解**；公开 API 带中文 docstring（含可执行示例者优先，doctest 必须能过）。
 - **标识符英文、docstring/消息中文**；错误消息模板为中文。
 - **子包禁止叫 `logging`**（与标准库冲突），统一叫 `logs`。
@@ -110,6 +110,7 @@ python -m pytest --doctest-modules src/lizysdk/errors  # docstring 示例验证
 python examples/demo.py                                # 端到端冒烟
 python benchmarks/bench.py --out benchmarks/results/x.json  # 性能压测
 python benchmarks/report.py                            # 压测聚合对比（报告见 benchmarks/REPORT.md）
+scripts/ci_matrix.sh                                   # 多版本矩阵（3.9/3.11/3.12/3.13，conda 环境驱动）
 python -m pip install -e .                             # 开发安装（可省，conftest 已注入 src）
 ```
 
