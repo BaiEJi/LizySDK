@@ -1,6 +1,6 @@
 r"""lizysdk.notify 异常族：NotifyError（子系统基类）与 ChannelError（渠道发送失败）。
 
-设计契约（``docs/notify-design.md`` §2/§4）：
+设计契约（``docs/lizysdk.md`` §4.8）：
 
 - 渠道发送失败统一抛 :class:`ChannelError`，中文消息携带**渠道名 /
   HTTP 状态 / 响应体摘要**三要素，并作为属性供程序化读取；

@@ -245,7 +245,7 @@ run_all([(fetch, (u,), {}) for u in urls], kind="thread", workers=8)   # 一次�
 - 背压：`queue_size` + `reject_policy="raise"|"block"`；钩子自身异常被吞并计数，绝不影响任务
 - 诚实语义：thread/process 的 `task_timeout` 为结果等待超时（任务本体不可中断），async 为
   `asyncio.wait_for` 真取消；进程池不传播 contextvars（不可 pickle）
-- 设计与取舍详见 [docs/pools-design.md](docs/pools-design.md)（参考 concurrent.futures /
+- 设计与取舍详见 [docs/lizysdk.md](docs/lizysdk.md) §4.5（参考 concurrent.futures /
   pebble / anyio；**文末附压测数据**：线程池 ×15.9 近理想线性、进程池 CPU ×4.2、
   协程池 ×145、包装层与 stdlib 端到端持平）
 
@@ -331,7 +331,7 @@ lb.around("alice", span=2)               # 「我的排名」窗口
 诚实边界：锁/选举为**单实例**语义（多节点 Redlock 见设计文档 v2）；强互斥正确性需
 业务侧 fencing token；可靠队列 at-least-once 可能重复投递。算法出处与对比
 （Redisson/K8s/Stripe/redis.io 官方 pattern）见
-[docs/redis-suite-design.md](docs/redis-suite-design.md)。
+[docs/lizysdk.md](docs/lizysdk.md) §4.7。
 
 ### 8. 通知中心（`lizysdk.notify`，零依赖）
 
@@ -359,7 +359,7 @@ center.flush(timeout=10)
   有防串用回归钩子）；企微无需签名；邮件走 smtplib
 - 单渠道失败隔离不影响其他渠道；重试指数退避；atexit 排空不丢
 - 设计对比（Apprise/notifiers/Grafana/ntfy）与渠道契约见
-  [docs/notify-design.md](docs/notify-design.md)
+  [docs/lizysdk.md](docs/lizysdk.md) §4.8
 
 ---
 
@@ -393,7 +393,7 @@ def get_order(order_no: str):
 
 `send_url` 指向任一 HTTP JSON 接收端即可：
 
-- **自研 lizylog**（SQLite/PG 双存储，设计文档：[docs/log-server-design.md](docs/log-server-design.md)）
+- **自研 lizylog**（SQLite/PG 双存储，对接说明见 [docs/lizysdk.md](docs/lizysdk.md) §9 FAQ）
   ```python
   setup_logging(..., send_json=True, send_url="http://log-server:9280/api/v1/logs")
   ```
@@ -436,12 +436,15 @@ lizysdk/
 │   ├── ext/        # fastapi_adapter.py · flask_adapter.py（可选依赖组 [web]）
 │   ├── pools/      # 统一并发池：base/thread_pool/async_pool/process_pool/exceptions
 │   ├── shell/      # shell 执行包装：run/ShellResult/ShellError（零依赖）
-│   ├── dist/       # 分布式原语：window.py 滑动窗口 · lock.py 分布式锁（可选组 [redis]，懒加载）
+│   ├── dist/       # Redis 能力套件：window 计数器 · lock DLock · reentrant_lock RLock+看门狗
+│   │               # election 选举 · idempotent 幂等键 · queue 可靠/延迟队列 · leaderboard 排行榜
+│   │               #（可选组 [redis]，模块级懒加载）
 │   └── notify/     # 通知中心：五渠道 channels.py · NotifyCenter center.py（零依赖）
-├── tests/          # test_ids / test_logs / test_errors / test_ext_web / test_integration
-├── benchmarks/     # bench.py 压测脚本 · report.py 聚合对比 · REPORT.md 报告 · results/
+├── tests/          # test_ids/logs/errors/ext_web/integration/pools/shell/dist×4/notify（共 825）
+├── benchmarks/     # bench.py · pool_bench.py · redis_bench.py 压测脚本 · REPORT.md ·
+│                   # REDIS_REPORT.md 报告 · results/ 原始数据
 ├── examples/       # demo.py 基础三件套 · web_demo.py FastAPI 全家桶
-└── docs/           # log-server-design.md 日志服务端设计
+└── docs/           # lizysdk.md 全方位文档（唯一文档，随版本对齐）
 ```
 
 ## 支持矩阵
@@ -450,20 +453,20 @@ lizysdk/
 
 | Python | 结果 | 实测版本 |
 |---|---|---|
-| 3.9 | ✅ 434 passed | 3.9.25（最低支持） |
-| 3.10 | ✅ 434 passed | 3.10.19（开发主环境） |
-| 3.11 | ✅ 434 passed | 3.11.16 |
-| 3.12 | ✅ 434 passed | 3.12.14 |
-| 3.13 | ✅ 434 passed | 3.13.15 |
+| 3.9 | ✅ 825 passed | 3.9.25（最低支持） |
+| 3.10 | ✅ 825 passed | 3.10.19（开发主环境） |
+| 3.11 | ✅ 825 passed | 3.11.16 |
+| 3.12 | ✅ 825 passed | 3.12.14 |
+| 3.13 | ✅ 825 passed | 3.13.15 |
 
-实测环境：Windows 10 · conda 多环境（2026-09-19）。复现：`scripts/ci_matrix.sh`
+实测环境：Windows 10 · conda 多环境（2026-10-10）。复现：`scripts/ci_matrix.sh`
 （conda 环境驱动，环境创建见脚本注释）；新增版本时同步更新 pyproject classifiers
 与本表。
 
 ## 开发与测试
 
 ```bash
-python -m pytest -v                                   # 全量测试（354 个）
+python -m pytest -v                                   # 全量测试（825 个）
 python -m pytest tests/test_logs.py -v                # 单模块
 python -m pytest --doctest-modules src/lizysdk/errors # 文档示例验证
 python examples/web_demo.py                           # 全家桶端到端冒烟
@@ -473,7 +476,7 @@ python examples/web_demo.py                           # 全家桶端到端冒烟
 
 ## 变更记录
 
-- **0.8.0** —— `lizysdk.dist` 扩为 Redis 能力套件：`RLock` 可重入锁+看门狗（Redisson）、`LeaderElector` 领导选举（K8s Lease）、`IdempotentKey` 幂等键（Stripe 两态）、`ReliableQueue` 可靠队列（redis.io 官方 pattern）、`DelayQueue` 延迟队列（Redisson RDelayedQueue）、`Leaderboard` 排行榜（redis.io）；150 新测试（fakeredis 全离线）+ 压测报告（benchmarks/REDIS_REPORT.md）
+- **0.8.0** —— `lizysdk.dist` 扩为 Redis 能力套件：`RLock` 可重入锁+看门狗（Redisson）、`LeaderElector` 领导选举（K8s Lease）、`IdempotentKey` 幂等键（Stripe 两态）、`ReliableQueue` 可靠队列（redis.io 官方 pattern）、`DelayQueue` 延迟队列（Redisson RDelayedQueue）、`Leaderboard` 排行榜（redis.io）；150 新测试（fakeredis 全离线）+ 压测报告（benchmarks/REDIS_REPORT.md）；**文档整合为单册** [docs/lizysdk.md](docs/lizysdk.md)（原五份设计文档并入 git 历史）
 - **0.7.0** —— 新增 `lizysdk.notify` 通知中心：钉钉/飞书/企微/邮件/自定义 webhook
   五渠道（消息格式与签名逐字节对齐官方 API）、级别路由、静默期（跨午夜）、同标题
   频控、异步投递/重试/失败隔离/统计；参考 Apprise/Grafana 告警模型

@@ -1,6 +1,6 @@
 r"""lizysdk.notify 渠道层：钉钉 / 飞书 / 企业微信 / 邮件 / 自定义 Webhook。
 
-设计契约 ``docs/notify-design.md`` §2 的逐条落实——五个内置渠道对齐
+设计契约 ``docs/lizysdk.md`` §4.8 的逐条落实——五个内置渠道对齐
 各官方机器人 API，payload 结构、标题拼接规则、签名算法与成功判定
 **逐字节可测**：
 

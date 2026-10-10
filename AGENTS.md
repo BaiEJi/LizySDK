@@ -10,10 +10,10 @@
 2. **`lizysdk.logs`** —— 结构化日志（**sys_name 系统标识**、pipe/JSON 双格式、轮转、后台写入池、线程安全、contextvars 上下文、**打印完即发送 JSON 到远端**）
 3. **`lizysdk.errors`** —— 标准化错误体系（错误码枚举、**业务码动态注册表**、AppError、标准子类、wrap/ensure）
 4. **`lizysdk.ext`** —— Web 框架适配器（FastAPI/Flask 的 AppError 异常处理，**可选依赖组 `[web]`**）
-5. **`lizysdk.pools`** —— 统一并发池（`create_pool(kind)`：thread/async/process；统一 submit/map/shutdown/stats/add_hook；重试/背压/超时/ctx 传播/八事件钩子；设计契约见 `docs/pools-design.md`）
-6. **`lizysdk.shell`** —— shell 执行包装（`run`：恒 shell=False、超时终止、富错误、标准 logging 命令日志；设计契约见 `docs/shell-dist-design.md`）
-7. **`lizysdk.dist`** —— 分布式原语（Redis 滑动窗口计数器 ZSET+Lua、分布式锁 SET NX PX + token + Lua；**可选组 `[redis]`，模块级懒加载**；设计契约见 `docs/shell-dist-design.md`）
-8. **`lizysdk.notify`** —— 通知中心（钉钉/飞书/企微/邮件/自定义 webhook 五渠道；级别路由、静默期、频控、异步投递；零依赖；设计契约见 `docs/notify-design.md`）
+5. **`lizysdk.pools`** —— 统一并发池（`create_pool(kind)`：thread/async/process；统一 submit/map/shutdown/stats/add_hook；重试/背压/超时/ctx 传播/八事件钩子；设计与契约见 `docs/lizysdk.md` §4.5）
+6. **`lizysdk.shell`** —— shell 执行包装（`run`：恒 shell=False、超时终止、富错误、标准 logging 命令日志；设计与契约见 `docs/lizysdk.md` §4.6）
+7. **`lizysdk.dist`** —— 分布式原语（Redis 滑动窗口计数器 ZSET+Lua、分布式锁 SET NX PX + token + Lua；**可选组 `[redis]`，模块级懒加载**；设计与契约见 `docs/lizysdk.md` §4.7）
+8. **`lizysdk.notify`** —— 通知中心（钉钉/飞书/企微/邮件/自定义 webhook 五渠道；级别路由、静默期、频控、异步投递；零依赖；设计与契约见 `docs/lizysdk.md` §4.8）
 
 设计参考自 [BaiEJi/LzyTools](https://github.com/BaiEJi/LzyTools) 的 `basic_tool/id_generator` 与 `basic_tool/errors`，为独立发布重新实现（不共享代码）。
 
@@ -90,22 +90,22 @@ LEVEL||TIMESTAMP||FILE:LINE||sys_name=xxx||k1=v1||k2=v2||message=<文本>
 
 ### pools（`src/lizysdk/pools/`）
 
-- 契约唯一来源：`docs/pools-design.md`；改接口先改文档。
+- 契约来源：`docs/lizysdk.md` §4.5 + 模块 docstring；改接口先同步文档。
 - 自持异常族（`PoolError/PoolClosedError/PoolRejectedError`），**禁止 import 其他 lizysdk 子包**。
 - 关键决策（勿回退）：① ThreadPool 用**自管 worker 线程**而非 `ThreadPoolExecutor`（stdlib 3.9+ 线程非 daemon 且不可控，daemon 契约要求自管，docstring 已记录该偏离）；② `max_tasks_per_worker` 仅 process 池支持且走 `multiprocessing.Pool(maxtasksperchild)` 双路径（3.10 的 `ProcessPoolExecutor` 无此参数）；③ 超时语义分池诚实声明：async=`asyncio.wait_for` 真取消（统一抛内建 `TimeoutError`），thread/process=结果等待超时不可中断；④ 钩子异常一律吞掉计数（`stats()["hook_errors"]`）；⑤ 闸门/计数器全程持锁，**任何路径下用户 Future 不得悬置**（曾有计数器名前缀错误、async 取消令牌泄漏、进程池取消悬置三个真实缺陷，安全网回调是兜底，勿删）。
 - 测试注意：process 套件用 session 级 fixture 复用池（Windows spawn 慢）；并发用例改完必须连跑 3 轮防抖。
 
 ### shell / dist（`src/lizysdk/shell/` · `src/lizysdk/dist/`）
 
-- 契约唯一来源：`docs/shell-dist-design.md`；改接口先改文档。
+- 契约来源：`docs/lizysdk.md` §4.6/§4.7 + 模块 docstring；改接口先同步文档。
 - shell：安全红线恒 `shell=False`（str argv 走 `shlex.split`，不支持管道/重定向）；超时语义依赖 `subprocess.run(timeout=...)`（Windows TerminateProcess）；`ShellTimeoutError` 携带部分输出。
 - dist 窗口计数器：ZSET+Lua 单脚本原子四步（ZADD→ZREMRANGEBYSCORE→ZCARD→PEXPIRE），窗口为 `(now-window, now]` 含边界剔除；member 唯一性靠 `{now}:{pid}:{token_hex}`；时间接缝是模块级 `_now()`（测试 monkeypatch 用，勿删）。内存 O(N)。
 - dist 锁：语义对齐 redis-py Lock（`SET NX PX` + token + Lua compare-token 释放/续期；**不可重入**；`LockNotOwnedError` 释放他人锁）；阻塞轮询带随机抖动防惊群；**效率锁非正确性锁**（Kleppmann 注记勿删）。测试用 fakeredis（Lua 需 lupa），锁 TTL 过期类用例用极短 timeout + 真实 sleep（fakeredis TTL 不受 monkeypatch 时间影响）。
-- dist Redis 套件（v0.8.0，契约唯一来源 `docs/redis-suite-design.md`）：六件算法全部对齐开源实现，**禁止自创语义**——RLock=Redisson RedissonLock（hash field=`{instance_uuid}:{thread_ident}` 重入计数；成功哨兵 -1；看门狗每 `watchdog_timeout/3` 续期、release 到 0 层停、`__del__` 兜底）；LeaderElector=K8s Lease（compare-holder Lua 续期；**先降级再回调**；回调内调 stop 抛 LockError 防自 join 死锁）；IdempotentKey=Stripe 两态（processing→done；fail 是 compare-holder cjson Lua，终态 done 不许拆）；ReliableQueue=redis.io 官方 pattern（LPUSH/LMOVE→processing/LREM ack/recover 全量搬回，at-least-once 明示；BLMOVE 小步循环步长 `_BLOCK_STEP`）；DelayQueue=Redisson RDelayedQueue（ZSET score=到期分 + `_MOVE_DUE_LUA` ZREM 成功才 LPUSH，并发搬运不重不漏）；Leaderboard=redis.io ZSET（**1-based 名次**是显式声明的偏差；同分 member 字典序原生保留）。时间接缝 `_now()`/`_sleep()` 勿删；冻结 `_now` 的测试只能走非阻塞入口（timeout=0）。
+- dist Redis 套件（v0.8.0，契约见 `docs/lizysdk.md` §4.7）：六件算法全部对齐开源实现，**禁止自创语义**——RLock=Redisson RedissonLock（hash field=`{instance_uuid}:{thread_ident}` 重入计数；成功哨兵 -1；看门狗每 `watchdog_timeout/3` 续期、release 到 0 层停、`__del__` 兜底）；LeaderElector=K8s Lease（compare-holder Lua 续期；**先降级再回调**；回调内调 stop 抛 LockError 防自 join 死锁）；IdempotentKey=Stripe 两态（processing→done；fail 是 compare-holder cjson Lua，终态 done 不许拆）；ReliableQueue=redis.io 官方 pattern（LPUSH/LMOVE→processing/LREM ack/recover 全量搬回，at-least-once 明示；BLMOVE 小步循环步长 `_BLOCK_STEP`）；DelayQueue=Redisson RDelayedQueue（ZSET score=到期分 + `_MOVE_DUE_LUA` ZREM 成功才 LPUSH，并发搬运不重不漏）；Leaderboard=redis.io ZSET（**1-based 名次**是显式声明的偏差；同分 member 字典序原生保留）。时间接缝 `_now()`/`_sleep()` 勿删；冻结 `_now` 的测试只能走非阻塞入口（timeout=0）。
 
 ### notify（`src/lizysdk/notify/`）
 
-- 契约唯一来源：`docs/notify-design.md` §2 渠道表——**payload 与签名逐字节对齐官方 API**，改渠道实现必须同步文档并跑逐字节断言。
+- 契约来源：`docs/lizysdk.md` §4.8 渠道表——**payload 与签名逐字节对齐官方 API**，改渠道实现必须同步文档并跑逐字节断言。
 - 签名考点（勿混）：钉钉 `hmac(key=secret, msg=f"{ts_ms}\n{secret}")`→b64→quote_plus 拼 URL；飞书 `hmac(key=f"{ts}\n{secret}", msg=b"")`→b64 进 body（ts 秒）——**两者算法产物互不相同，防串用回归钩子勿删**；企微无签名。
 - 测试离线红线：HTTP 渠道一律 `transport(url, payload, headers, timeout)->(status, text)` 注入；邮件 `mailer(msg_bytes, sender, to)` 注入或 monkeypatch smtplib——**禁止真实网络**。
 - 中心语义：抑制判断（静默期/频控）在**入队前**；频控 LRU 上限 1024；同步模式返回 `{渠道: bool}` 不抛发送异常；`last_error` 记最近一次失败不因成功清除。
@@ -145,7 +145,7 @@ python -m pip install -e .                             # 开发安装（可省�
 
 ## 变更记录
 
-- **0.8.0** —— dist 扩为 Redis 能力套件：RLock 可重入锁+看门狗（Redisson）/ LeaderElector 领导选举（K8s Lease）/ IdempotentKey 幂等键（Stripe）/ ReliableQueue 可靠队列（redis.io）/ DelayQueue 延迟队列（Redisson RDelayedQueue）/ Leaderboard 排行榜（redis.io）；150 新测试（全 fakeredis 离线）；fakeredis 口径压测（benchmarks/redis_bench.py + REDIS_REPORT.md）
+- **0.8.0** —— dist 扩为 Redis 能力套件：RLock 可重入锁+看门狗（Redisson）/ LeaderElector 领导选举（K8s Lease）/ IdempotentKey 幂等键（Stripe）/ ReliableQueue 可靠队列（redis.io）/ DelayQueue 延迟队列（Redisson RDelayedQueue）/ Leaderboard 排行榜（redis.io）；150 新测试（全 fakeredis 离线）；fakeredis 口径压测（benchmarks/redis_bench.py + REDIS_REPORT.md）；**文档整合为单册 docs/lizysdk.md**（原五份设计文档删除、可回溯 git 历史；本文件的契约引用已全部改指新单册）
 - **0.7.0** —— 新增 lizysdk.notify 通知中心（五渠道/路由/静默期/频控/异步重试；参考 Apprise/Grafana；docs/notify-design.md；147 离线测试）
 - **0.6.0** —— 新增 lizysdk.shell（run/富错误/结构化命令日志）与 lizysdk.dist（Redis 滑动窗口计数器 + 分布式锁，可选组 [redis] 懒加载）；对比参考 sh/plumbum/limits/redis-py Lock/Redlock（docs/shell-dist-design.md）；92 新测试；多版本矩阵（3.9~3.13）随 0.5.x 建立
 - **0.5.0** —— 新增 lizysdk.pools 统一并发池（设计契约 docs/pools-design.md；78 新测试；参考 concurrent.futures/pebble/anyio）

@@ -1,4 +1,4 @@
-"""lizysdk.dist —— 分布式原语 / Redis 能力套件（设计文档 docs/redis-suite-design.md）。
+"""lizysdk.dist —— 分布式原语 / Redis 能力套件（文档 docs/lizysdk.md §4.7）。
 
 属于 ``lizysdk[redis]`` 可选依赖组：**模块级不 import redis**——未安装
 redis 的环境 ``import lizysdk.dist`` 依然成功；所有需要 redis 的路径在

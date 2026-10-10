@@ -1,6 +1,6 @@
 r"""lizysdk.notify 通知中心：路由 / 静默期 / 频控 / 异步分发 / 统计。
 
-设计契约 ``docs/notify-design.md`` §3/§4 的语义细则逐条落实：
+设计契约 ``docs/lizysdk.md`` §4.8 的语义细则逐条落实：
 
 - **级别**：``info | warning | error | critical``（与 logging 对齐），
   非法级别抛 :class:`ValueError`（中文）；

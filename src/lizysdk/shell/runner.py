@@ -1,7 +1,7 @@
 """shell 命令执行薄加固层：:func:`run` / :class:`ShellResult` / 富错误族。
 
 在 :func:`subprocess.run` 语义基座之上做四件事（设计文档
-``docs/shell-dist-design.md`` §1.1/§2.1）：
+``docs/lizysdk.md`` §4.6）：
 
 1. **安全拆分与安全红线**：``argv`` 允许传 str，内部经
    :func:`shlex.split` 拆分为参数列表——因此**天然不支持** shell
