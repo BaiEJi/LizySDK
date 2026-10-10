@@ -1,0 +1,5 @@
+# sdist 附加文件（wheel 不含；pip 源码安装 / GitHub 下载源码包时可见）
+include AGENTS.md
+include docs/lizysdk.md
+recursive-include benchmarks *.py *.md
+recursive-exclude benchmarks results *
